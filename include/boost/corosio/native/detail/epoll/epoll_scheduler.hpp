@@ -244,7 +244,10 @@ inline void
 epoll_scheduler::register_descriptor(int fd, reactor_descriptor_state* desc) const
 {
     epoll_event ev{};
-    ev.events   = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLERR | EPOLLHUP;
+    // EPOLLRDHUP detects a peer half-close (shutdown(SHUT_WR)); with EPOLLHUP it lets
+    // run_task() surface a hangup to a parked op so the fd is closed promptly instead
+    // of re-firing (see the event translation in run_task — oramasearch/zetta#740).
+    ev.events   = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
     ev.data.ptr = desc;
 
     if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0)
@@ -371,7 +374,24 @@ epoll_scheduler::run_task(
 
         auto* desc =
             static_cast<reactor_descriptor_state*>(event_buffer_[i].data.ptr);
-        desc->add_ready_events(event_buffer_[i].events);
+
+        // Translate raw epoll flags into the reactor's read/write/error events.
+        // EPOLLIN/OUT/ERR already share the reactor_event_* bit values, but
+        // EPOLLHUP and EPOLLRDHUP do NOT — and epoll reports them on EVERY wait
+        // (level-persistent, and unmaskable via the interest set) until the fd is
+        // closed. Passing them through raw left them unconsumed: a hung-up fd with
+        // a parked read/write op would re-wake the reactor forever at 100% CPU
+        // (issue oramasearch/zetta#740). Map a hangup so a parked op completes with
+        // an error and the owner closes the fd (which deregisters it, ending the
+        // storm). EPOLLHUP = both directions gone → wake read, write, and error;
+        // EPOLLRDHUP = peer closed its write end → the read will see EOF.
+        const std::uint32_t raw = event_buffer_[i].events;
+        std::uint32_t ev = raw & (EPOLLIN | EPOLLOUT | EPOLLERR);
+        if (raw & EPOLLHUP)
+            ev |= reactor_event_read | reactor_event_write | reactor_event_error;
+        if (raw & EPOLLRDHUP)
+            ev |= reactor_event_read;
+        desc->add_ready_events(ev);
 
         bool expected = false;
         if (desc->is_enqueued_.compare_exchange_strong(
