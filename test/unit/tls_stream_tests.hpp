@@ -21,6 +21,8 @@
 
 #include <array>
 #include <cstddef>
+#include <initializer_list>
+#include <string_view>
 
 #include "test_suite.hpp"
 
@@ -225,6 +227,67 @@ testShutdownFuse(StreamFactory make_stream)
 //
 // Success/Failure Tests
 //
+
+template<typename StreamFactory>
+void
+runAlpnTest(
+    StreamFactory make_stream,
+    std::initializer_list<std::string_view> client_protocols,
+    std::initializer_list<std::string_view> server_protocols,
+    std::string_view expected_protocol)
+{
+    io_context ioc;
+    auto [client_socket, server_socket] = corosio::test::make_socket_pair(ioc);
+
+    auto client_ctx = make_client_context();
+    auto server_ctx = make_server_context();
+    BOOST_TEST(!client_ctx.set_alpn(client_protocols));
+    BOOST_TEST(!server_ctx.set_alpn(server_protocols));
+
+    auto client = make_stream(client_socket, client_ctx);
+    auto server = make_stream(server_socket, server_ctx);
+
+    BOOST_TEST(client.selected_alpn().empty());
+    BOOST_TEST(server.selected_alpn().empty());
+
+    std::error_code client_ec;
+    std::error_code server_ec;
+
+    auto client_task = [&]() -> capy::task<> {
+        auto [ec] = co_await client.handshake(tls_stream::client);
+        client_ec = ec;
+    };
+    auto server_task = [&]() -> capy::task<> {
+        auto [ec] = co_await server.handshake(tls_stream::server);
+        server_ec = ec;
+    };
+
+    capy::run_async(ioc.get_executor())(client_task());
+    capy::run_async(ioc.get_executor())(server_task());
+    ioc.run();
+
+    BOOST_TEST(!client_ec);
+    BOOST_TEST(!server_ec);
+    if (!client_ec && !server_ec)
+    {
+        tls_stream const& client_stream = client;
+        tls_stream const& server_stream = server;
+        BOOST_TEST_EQ(client_stream.selected_alpn(), expected_protocol);
+        BOOST_TEST_EQ(server_stream.selected_alpn(), expected_protocol);
+    }
+
+    client_socket.close();
+    server_socket.close();
+}
+
+/** Test ALPN negotiation and a successful handshake without a match. */
+template<typename StreamFactory>
+void
+testAlpn(StreamFactory make_stream)
+{
+    runAlpnTest(make_stream, {"h2", "http/1.1"}, {"http/1.1", "h2"}, "h2");
+    runAlpnTest(make_stream, {"http/1.1"}, {"h2"}, "");
+}
 
 /** Test TLS success cases with certificate verification.
 

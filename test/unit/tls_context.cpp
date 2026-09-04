@@ -376,6 +376,13 @@ struct tls_context_test
         ec = ctx.set_alpn({});
         BOOST_TEST(!ec);
         BOOST_TEST_EQ(data.alpn_protocols.size(), 0u);
+
+        ec = ctx.set_alpn({""});
+        BOOST_TEST(ec == std::make_error_code(std::errc::invalid_argument));
+
+        std::string long_protocol(256, 'a');
+        ec = ctx.set_alpn({long_protocol});
+        BOOST_TEST(ec == std::make_error_code(std::errc::invalid_argument));
     }
 
     //

@@ -112,6 +112,59 @@ namespace detail {
 
 static int sni_ctx_data_index = -1;
 
+static std::vector<unsigned char>
+make_alpn_wire_list(std::vector<std::string> const& protocols)
+{
+    std::vector<unsigned char> result;
+
+    for (auto const& protocol : protocols)
+    {
+        result.push_back(static_cast<unsigned char>(protocol.size()));
+        result.insert(result.end(), protocol.begin(), protocol.end());
+    }
+
+    return result;
+}
+
+static int
+alpn_select_callback(
+    SSL*,
+    unsigned char const** out,
+    unsigned char* outlen,
+    unsigned char const* in,
+    unsigned int inlen,
+    void* arg)
+{
+    auto const* cd      = static_cast<tls_context_data const*>(arg);
+    unsigned int offset = 0;
+
+    while (offset < inlen)
+    {
+        auto const protocol_length = in[offset];
+        ++offset;
+
+        if (protocol_length == 0 || protocol_length > inlen - offset)
+            return SSL_TLSEXT_ERR_NOACK;
+
+        for (auto const& protocol : cd->alpn_protocols)
+        {
+            if (protocol.size() != protocol_length)
+                continue;
+
+            if (std::memcmp(protocol.data(), in + offset, protocol_length) != 0)
+                continue;
+
+            *out    = in + offset;
+            *outlen = protocol_length;
+            return SSL_TLSEXT_ERR_OK;
+        }
+
+        offset += protocol_length;
+    }
+
+    return SSL_TLSEXT_ERR_NOACK;
+}
+
 static int
 password_callback(char* buf, int size, int rwflag, void* userdata)
 {
@@ -177,6 +230,16 @@ public:
 
         if (cd.servername_callback)
             SSL_CTX_set_tlsext_servername_callback(ctx_, sni_callback);
+
+        if (!cd.alpn_protocols.empty())
+        {
+            auto const protocols = make_alpn_wire_list(cd.alpn_protocols);
+            SSL_CTX_set_alpn_protos(
+                ctx_, protocols.data(),
+                static_cast<unsigned int>(protocols.size()));
+            SSL_CTX_set_alpn_select_cb(
+                ctx_, alpn_select_callback, const_cast<tls_context_data*>(&cd));
+        }
 
         SSL_CTX_set_mode(ctx_, SSL_MODE_ENABLE_PARTIAL_WRITE);
         SSL_CTX_set_mode(ctx_, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
@@ -783,6 +846,19 @@ void
 openssl_stream::reset()
 {
     impl_->reset();
+}
+
+std::string_view
+openssl_stream::selected_alpn() const noexcept
+{
+    unsigned char const* protocol = nullptr;
+    unsigned int size             = 0;
+
+    SSL_get0_alpn_selected(impl_->ssl_, &protocol, &size);
+    if (!protocol)
+        return {};
+
+    return {reinterpret_cast<char const*>(protocol), size};
 }
 
 std::string_view

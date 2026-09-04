@@ -164,6 +164,16 @@ public:
     */
     virtual capy::any_stream const& next_layer() const noexcept = 0;
 
+    /** Returns the application protocol selected by ALPN.
+
+        The returned view remains valid until the stream is reset or
+        destroyed. An empty view indicates that the handshake did not
+        negotiate an application protocol.
+
+        @return The selected ALPN protocol, or an empty view.
+    */
+    virtual std::string_view selected_alpn() const noexcept = 0;
+
     /** Returns the name of the TLS backend.
 
         @return A string identifying the TLS implementation,
