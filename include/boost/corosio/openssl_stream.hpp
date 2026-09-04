@@ -183,6 +183,12 @@ public:
         return stream_;
     }
 
+    /** Return the application protocol selected by ALPN.
+
+        @return The selected protocol, or an empty view if none was selected.
+    */
+    std::string_view selected_alpn() const noexcept override;
+
     /// Return the TLS backend name ("openssl").
     std::string_view name() const noexcept override;
 

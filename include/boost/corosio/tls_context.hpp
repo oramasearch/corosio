@@ -585,11 +585,17 @@ public:
         protocol to use over the TLS connection (e.g., "h2" for HTTP/2,
         "http/1.1" for HTTP/1.1).
 
-        The protocols are tried in preference order (first = highest).
+        A client sends the protocols in preference order. A server uses the
+        list as its supported set and selects the first client-offered
+        protocol that appears in the set.
 
         @param protocols Ordered list of protocol identifiers.
 
-        @return Success, or an error if ALPN configuration fails.
+        Each protocol identifier must contain between 1 and 255 bytes, and
+        the encoded list must fit in 65535 bytes.
+
+        @return Success, or `std::errc::invalid_argument` if a protocol or
+            the encoded list has an invalid length.
 
         @par Example
         @code

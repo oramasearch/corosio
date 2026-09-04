@@ -173,6 +173,22 @@ tls_context::set_ciphersuites(std::string_view ciphers)
 std::error_code
 tls_context::set_alpn(std::initializer_list<std::string_view> protocols)
 {
+    constexpr std::size_t max_protocol_size = 255;
+    constexpr std::size_t max_list_size     = 65535;
+    std::size_t list_size                   = 0;
+
+    for (auto const protocol : protocols)
+    {
+        if (protocol.empty() || protocol.size() > max_protocol_size)
+            return std::make_error_code(std::errc::invalid_argument);
+
+        auto const encoded_size = protocol.size() + 1;
+        if (encoded_size > max_list_size - list_size)
+            return std::make_error_code(std::errc::invalid_argument);
+
+        list_size += encoded_size;
+    }
+
     impl_->alpn_protocols.clear();
     for (auto const& p : protocols)
         impl_->alpn_protocols.emplace_back(p);

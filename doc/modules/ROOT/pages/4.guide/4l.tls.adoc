@@ -200,9 +200,32 @@ Application-Layer Protocol Negotiation selects the application protocol:
 
 [source,cpp]
 ----
-// Prefer HTTP/2, fall back to HTTP/1.1
-ctx.set_alpn({"h2", "http/1.1"}).value();
+tls_context client_ctx;
+client_ctx.set_alpn({"h2", "http/1.1"}).value();
+
+tls_context server_ctx;
+server_ctx.set_alpn({"h2", "http/1.1"}).value();
 ----
+
+The client sends its ordered list in the ClientHello. The server selects the
+first client-offered protocol that it also supports. Query either stream after
+the handshake to determine the result:
+
+[source,cpp]
+----
+(co_await secure.handshake(tls_stream::client)).value();
+
+if (secure.selected_alpn() == "h2")
+{
+    // Start HTTP/2.
+}
+----
+
+`selected_alpn()` returns an empty `std::string_view` before negotiation or when
+the protocol lists do not overlap. No overlap does not fail the TLS handshake.
+The returned view remains valid until the stream is reset or destroyed.
+
+WolfSSL must be built with `HAVE_ALPN` to negotiate application protocols.
 
 === Certificate Verification
 

@@ -20,6 +20,8 @@
 
 #ifdef BOOST_COROSIO_HAS_WOLFSSL
 
+#include <wolfssl/options.h>
+
 namespace boost::corosio {
 
 // Callable wrapper for passing to test helper templates
@@ -125,6 +127,9 @@ struct wolfssl_stream_test
         test::testSni(make_stream);
         test::testSniCallback(make_stream);
         test::testMtls(make_stream);
+#ifdef HAVE_ALPN
+        test::testAlpn(make_stream);
+#endif
 
         test::testReset(make_stream, cert_modes);
         test::testResetViaHandshake(make_stream, cert_modes);

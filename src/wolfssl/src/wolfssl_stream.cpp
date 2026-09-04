@@ -84,6 +84,23 @@ namespace {
 // Default buffer size for TLS I/O
 constexpr std::size_t default_buffer_size = 16384;
 
+#ifdef HAVE_ALPN
+std::string
+make_alpn_list(std::vector<std::string> const& protocols)
+{
+    std::string result;
+
+    for (auto const& protocol : protocols)
+    {
+        if (!result.empty())
+            result.push_back(',');
+        result.append(protocol);
+    }
+
+    return result;
+}
+#endif
+
 inline bool
 is_zero_return_error(int err) noexcept
 {
@@ -996,6 +1013,23 @@ struct wolfssl_stream::impl
         wolfSSL_SetIOReadCtx(ssl_, this);
         wolfSSL_SetIOWriteCtx(ssl_, this);
 
+#ifdef HAVE_ALPN
+        if (!cd.alpn_protocols.empty())
+        {
+            auto protocols = make_alpn_list(cd.alpn_protocols);
+            int result     = wolfSSL_UseALPN(
+                ssl_, protocols.data(),
+                static_cast<unsigned int>(protocols.size()),
+                WOLFSSL_ALPN_CONTINUE_ON_MISMATCH);
+            if (result != WOLFSSL_SUCCESS)
+            {
+                if (result == WOLFSSL_FAILURE)
+                    return std::make_error_code(std::errc::invalid_argument);
+                return std::error_code(result, std::system_category());
+            }
+        }
+#endif
+
         // Apply per-session config (SNI + hostname verification) from context
         if (type == wolfssl_stream::client && !cd.hostname.empty())
         {
@@ -1074,6 +1108,26 @@ void
 wolfssl_stream::reset()
 {
     impl_->reset();
+}
+
+std::string_view
+wolfssl_stream::selected_alpn() const noexcept
+{
+#ifdef HAVE_ALPN
+    char* protocol      = nullptr;
+    unsigned short size = 0;
+
+    if (!impl_->ssl_)
+        return {};
+
+    if (wolfSSL_ALPN_GetProtocol(impl_->ssl_, &protocol, &size) !=
+        WOLFSSL_SUCCESS)
+        return {};
+
+    return {protocol, size};
+#else
+    return {};
+#endif
 }
 
 std::string_view
