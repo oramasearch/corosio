@@ -74,7 +74,8 @@ use-after-free.
 
 `boost.corosio.socket_stress.close_race.{kqueue,epoll,select}` in
 `test/unit/socket_stress.cpp` runs an `io_context` on four threads with 256
-lanes (64 on select, which caps descriptors at `FD_SETSIZE`). Each lane opens a
+lanes (64 on select, which caps descriptors at `FD_SETSIZE`), then on 16 threads
+with 64 lanes (added for #7, see `register-ordering.md`). Each lane opens a
 connected pair, parks a read on one end, writes to the other and closes it,
 without waiting for the reader. The reader destroys its socket on whichever
 runner resumed it, while the writes and the hang-up are still producing events.

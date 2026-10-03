@@ -755,13 +755,10 @@ struct close_race_stress_test
     // Enough lanes that each reactor pass returns many events, which
     // widens the window between kevent()/epoll_wait() and the end of the
     // pass. select rejects descriptors at or above FD_SETSIZE, so it gets
-    // fewer lanes.
-    static constexpr unsigned runners = 4;
-    static constexpr int lanes        = is_select() ? 64 : 256;
-
-    // Lanes do not wait for their readers; this bounds the readers alive
-    // at once, and so the descriptors the run holds.
-    static constexpr int max_live_readers = lanes;
+    // fewer lanes. A second run uses 16 runners and fewer lanes, so
+    // reactor passes are short and frequent (#7: a descriptor queued by a
+    // pass before register_descriptor() had initialized it).
+    static constexpr int max_lanes = is_select() ? 64 : 256;
 
     // Requeue the awaiting coroutine behind the work already posted.
     struct yield_awaitable
@@ -785,6 +782,11 @@ struct close_race_stress_test
     struct state
     {
         io_context& ioc;
+
+        // Lanes do not wait for their readers; this bounds the readers
+        // alive at once, and so the descriptors the run holds.
+        int max_live_readers;
+
         std::atomic<bool> stop_flag{false};
         std::atomic<std::size_t> pairs{0};
         std::atomic<std::size_t> reads{0};
@@ -810,7 +812,7 @@ struct close_race_stress_test
         char const byte = 'x';
         while (!st.stop_flag.load(std::memory_order_relaxed))
         {
-            if (st.live_readers.load() >= max_live_readers)
+            if (st.live_readers.load() >= st.max_live_readers)
             {
                 // Not a timer: timers used on runner threads leave
                 // per-thread cache entries behind when those threads exit.
@@ -849,13 +851,20 @@ struct close_race_stress_test
 
     void run()
     {
+        run_with(4, max_lanes);
+        run_with(16, 64);
+    }
+
+    void run_with(unsigned runners, int lanes)
+    {
         int duration = get_stress_duration();
         std::fprintf(
-            stderr, "  close_race: running %d lanes for %d seconds...\n", lanes,
-            duration);
+            stderr,
+            "  close_race: running %d lanes on %u runners for %d seconds...\n",
+            lanes, runners, duration);
 
         io_context ioc(Backend, runners);
-        state st{ioc};
+        state st{ioc, lanes};
 
         for (int i = 0; i < lanes; ++i)
             capy::run_async(ioc.get_executor())(lane(st));
