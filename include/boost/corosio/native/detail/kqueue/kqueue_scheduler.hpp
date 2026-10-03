@@ -228,6 +228,21 @@ kqueue_scheduler::configure_reactor(
 inline void
 kqueue_scheduler::register_descriptor(int fd, reactor_descriptor_state* desc) const
 {
+    // Initialize the state before kevent() publishes it: from EV_ADD on,
+    // a reactor pass on another runner may queue it, and another runner
+    // may invoke it (which reads scheduler_ to balance the work count).
+    desc->registered_events = reactor_event_read | reactor_event_write;
+    desc->fd                = fd;
+    desc->scheduler_        = this;
+    desc->mutex.set_enabled(!single_threaded_);
+    desc->ready_events_.store(0, std::memory_order_relaxed);
+    {
+        conditionally_enabled_mutex::scoped_lock lock(desc->mutex);
+        desc->impl_ref_.reset();
+        desc->read_ready  = false;
+        desc->write_ready = false;
+    }
+
     struct kevent changes[2];
     EV_SET(
         &changes[0], static_cast<uintptr_t>(fd), EVFILT_READ, EV_ADD | EV_CLEAR,
@@ -237,18 +252,12 @@ kqueue_scheduler::register_descriptor(int fd, reactor_descriptor_state* desc) co
         EV_ADD | EV_CLEAR, 0, 0, desc);
 
     if (::kevent(kq_fd_, changes, 2, nullptr, 0, nullptr) < 0)
-        detail::throw_system_error(make_err(errno), "kevent (register)");
-
-    desc->registered_events = reactor_event_read | reactor_event_write;
-    desc->fd                = fd;
-    desc->scheduler_        = this;
-    desc->mutex.set_enabled(!single_threaded_);
-    desc->ready_events_.store(0, std::memory_order_relaxed);
-
-    conditionally_enabled_mutex::scoped_lock lock(desc->mutex);
-    desc->impl_ref_.reset();
-    desc->read_ready  = false;
-    desc->write_ready = false;
+    {
+        int errn                = errno;
+        desc->registered_events = 0;
+        desc->fd                = -1;
+        detail::throw_system_error(make_err(errn), "kevent (register)");
+    }
 }
 
 inline void

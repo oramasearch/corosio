@@ -250,19 +250,29 @@ epoll_scheduler::register_descriptor(int fd, reactor_descriptor_state* desc) con
     ev.events   = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
     ev.data.ptr = desc;
 
-    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0)
-        detail::throw_system_error(make_err(errno), "epoll_ctl (register)");
-
+    // Initialize the state before epoll_ctl() publishes it: from
+    // EPOLL_CTL_ADD on, a reactor pass on another runner may queue it,
+    // and another runner may invoke it (which reads scheduler_ to
+    // balance the work count).
     desc->registered_events = ev.events;
     desc->fd                = fd;
     desc->scheduler_        = this;
     desc->mutex.set_enabled(!single_threaded_);
     desc->ready_events_.store(0, std::memory_order_relaxed);
+    {
+        conditionally_enabled_mutex::scoped_lock lock(desc->mutex);
+        desc->impl_ref_.reset();
+        desc->read_ready  = false;
+        desc->write_ready = false;
+    }
 
-    conditionally_enabled_mutex::scoped_lock lock(desc->mutex);
-    desc->impl_ref_.reset();
-    desc->read_ready  = false;
-    desc->write_ready = false;
+    if (::epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0)
+    {
+        int errn                = errno;
+        desc->registered_events = 0;
+        desc->fd                = -1;
+        detail::throw_system_error(make_err(errn), "epoll_ctl (register)");
+    }
 }
 
 inline void

@@ -711,7 +711,10 @@ reactor_scheduler::work_started() noexcept
 inline void
 reactor_scheduler::work_finished() noexcept
 {
-    if (outstanding_work_.fetch_sub(1, std::memory_order_acq_rel) == 1)
+    auto const prev = outstanding_work_.fetch_sub(1, std::memory_order_acq_rel);
+    // Every work_finished() must match an earlier work_started().
+    BOOST_COROSIO_ASSERT(prev > 0);
+    if (prev == 1)
         stop();
 }
 
@@ -719,6 +722,9 @@ inline void
 reactor_scheduler::compensating_work_started() const noexcept
 {
     auto* ctx = reactor_find_context(this);
+    // Without a context the matching work_cleanup decrement goes
+    // unbalanced (#7: a descriptor invoked before its scheduler_ was set).
+    BOOST_COROSIO_ASSERT(ctx);
     if (ctx)
         ++ctx->private_outstanding_work;
 }
