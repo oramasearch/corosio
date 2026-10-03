@@ -18,15 +18,27 @@
 // 2. ready_ flag race - synchronous completion vs completion port delivery
 // 3. Rapid cancel/complete cycles
 // 4. shared_ptr lifetime - operation completion vs tcp_socket close race
+// 5. descriptor state lifetime - socket destroyed on one runner while
+//    another runner's reactor pass still holds its descriptor state
 //
-// Tests run on all backends (epoll, IOCP, select).
+// Tests run on all backends (epoll, IOCP, select); the descriptor state
+// test runs on the reactor backends (epoll, kqueue, select) only.
 
 #include <boost/corosio/tcp_socket.hpp>
 #include <boost/corosio/tcp_acceptor.hpp>
 #include <boost/corosio/socket_option.hpp>
 #include <boost/corosio/timer.hpp>
 
+#include <boost/corosio/detail/platform.hpp>
+#if BOOST_COROSIO_POSIX
+#include <boost/corosio/local_connect_pair.hpp>
+#include <boost/corosio/local_stream_socket.hpp>
+#include <sys/socket.h>
+#endif
+
 #include <boost/capy/cond.hpp>
+#include <boost/capy/continuation.hpp>
+#include <boost/capy/ex/io_env.hpp>
 #include <boost/capy/ex/run_async.hpp>
 #include <boost/capy/task.hpp>
 
@@ -34,6 +46,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "context.hpp"
@@ -710,5 +724,168 @@ struct accept_stress_test
 };
 
 COROSIO_BACKEND_TESTS(accept_stress_test, "boost.corosio.socket_stress.accept")
+
+#if BOOST_COROSIO_POSIX
+
+// Stress Test 6: Close/Destroy Race Across Runners
+//
+// With an io_context run on several threads, the reactor pass on one
+// runner holds raw descriptor-state pointers returned by the kernel
+// while other runners execute handlers. Each lane here opens a
+// connected pair, parks a read on one end, writes to the other and
+// closes it. The reader destroys its socket as soon as the read
+// completes, on whichever runner resumed it, while the writes and the
+// hang-up are still producing events for that descriptor. A reactor
+// pass that kept a pointer to the destroyed descriptor state would
+// then lock a destroyed mutex ("mutex lock failed") or touch freed
+// memory.
+
+template<auto Backend>
+struct close_race_stress_test
+{
+    static constexpr bool is_select() noexcept
+    {
+#if BOOST_COROSIO_HAS_SELECT
+        return std::is_same_v<std::remove_cv_t<decltype(Backend)>, select_t>;
+#else
+        return false;
+#endif
+    }
+
+    // Enough lanes that each reactor pass returns many events, which
+    // widens the window between kevent()/epoll_wait() and the end of the
+    // pass. select rejects descriptors at or above FD_SETSIZE, so it gets
+    // fewer lanes.
+    static constexpr unsigned runners = 4;
+    static constexpr int lanes        = is_select() ? 64 : 256;
+
+    // Lanes do not wait for their readers; this bounds the readers alive
+    // at once, and so the descriptors the run holds.
+    static constexpr int max_live_readers = lanes;
+
+    // Requeue the awaiting coroutine behind the work already posted.
+    struct yield_awaitable
+    {
+        capy::continuation cont_;
+
+        bool await_ready() const noexcept
+        {
+            return false;
+        }
+
+        void await_suspend(std::coroutine_handle<> h, capy::io_env const* env)
+        {
+            cont_.h = h;
+            env->executor.post(cont_);
+        }
+
+        void await_resume() const noexcept {}
+    };
+
+    struct state
+    {
+        io_context& ioc;
+        std::atomic<bool> stop_flag{false};
+        std::atomic<std::size_t> pairs{0};
+        std::atomic<std::size_t> reads{0};
+        std::atomic<std::size_t> pair_errors{0};
+        std::atomic<int> live_readers{0};
+    };
+
+    static capy::task<> reader(local_stream_socket s, state& st)
+    {
+        char buf[16];
+        auto [ec, n] =
+            co_await s.read_some(capy::mutable_buffer(buf, sizeof(buf)));
+        (void)ec;
+        (void)n;
+        ++st.reads;
+        --st.live_readers;
+        // s is closed and destroyed here, on the runner that resumed us
+    }
+
+    static capy::task<> lane(state& st)
+    {
+        auto ex         = st.ioc.get_executor();
+        char const byte = 'x';
+        while (!st.stop_flag.load(std::memory_order_relaxed))
+        {
+            if (st.live_readers.load() >= max_live_readers)
+            {
+                // Not a timer: timers used on runner threads leave
+                // per-thread cache entries behind when those threads exit.
+                co_await yield_awaitable{};
+                continue;
+            }
+
+            local_stream_socket a(st.ioc);
+            local_stream_socket b(st.ioc);
+            if (auto ec = connect_pair(a, b))
+            {
+                if (st.pair_errors++ == 0)
+                    std::fprintf(
+                        stderr, "  close_race: connect_pair: %s\n",
+                        ec.message().c_str());
+                co_return;
+            }
+            ++st.pairs;
+
+#ifdef SO_NOSIGPIPE
+            // connect_pair() adopts the descriptors as they are, and the
+            // writer may reach a reader that has already closed.
+            int one = 1;
+            ::setsockopt(
+                b.native_handle(), SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+
+            ++st.live_readers;
+            capy::run_async(ex)(reader(std::move(a), st));
+
+            (void)co_await b.write_some(capy::const_buffer(&byte, 1));
+            (void)co_await b.write_some(capy::const_buffer(&byte, 1));
+            b.close();
+        }
+    }
+
+    void run()
+    {
+        int duration = get_stress_duration();
+        std::fprintf(
+            stderr, "  close_race: running %d lanes for %d seconds...\n", lanes,
+            duration);
+
+        io_context ioc(Backend, runners);
+        state st{ioc};
+
+        for (int i = 0; i < lanes; ++i)
+            capy::run_async(ioc.get_executor())(lane(st));
+
+        std::thread stopper([&] {
+            std::this_thread::sleep_for(std::chrono::seconds(duration));
+            st.stop_flag.store(true, std::memory_order_relaxed);
+        });
+
+        std::vector<std::thread> threads;
+        for (unsigned i = 1; i < runners; ++i)
+            threads.emplace_back([&ioc] { ioc.run(); });
+        ioc.run();
+        for (auto& t : threads)
+            t.join();
+        stopper.join();
+
+        std::fprintf(
+            stderr, "  close_race: %zu pairs opened and closed\n",
+            st.pairs.load());
+
+        BOOST_TEST_EQ(st.pair_errors.load(), 0u);
+        BOOST_TEST(st.pairs.load() > 0);
+        BOOST_TEST_EQ(st.reads.load(), st.pairs.load());
+    }
+};
+
+COROSIO_REACTOR_BACKEND_TESTS(
+    close_race_stress_test, "boost.corosio.socket_stress.close_race")
+
+#endif // BOOST_COROSIO_POSIX
 
 } // namespace boost::corosio

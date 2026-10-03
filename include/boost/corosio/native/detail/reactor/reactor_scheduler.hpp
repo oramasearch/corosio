@@ -25,6 +25,7 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #include <boost/corosio/detail/conditionally_enabled_mutex.hpp>
 #include <boost/corosio/detail/conditionally_enabled_event.hpp>
@@ -232,6 +233,25 @@ public:
     */
     void post_deferred_completions(op_queue& ops) const;
 
+    /** Release a closed descriptor's owner once no reactor pass holds it.
+
+        A reactor pass copies raw descriptor-state pointers out of the
+        kernel and uses them until it splices its ready queue, while
+        other threads run handlers. A descriptor closed during that
+        window may still be touched by the pass, or queued by it after
+        the close looked at `is_enqueued_`. Call this after the
+        descriptor has been deregistered: if a pass is in flight,
+        @a owner is held until that pass ends; then (or at once, if
+        no pass is running) the descriptor state keeps @a owner in
+        `impl_ref_` when it is queued, and drops it otherwise.
+
+        @param desc The descriptor state of the closed descriptor.
+        @param owner A strong reference to the object holding @a desc.
+    */
+    template<class DescState>
+    void retire_descriptor(
+        DescState& desc, std::shared_ptr<void> owner) const noexcept;
+
     /** Apply runtime configuration to the scheduler.
 
         Called by `io_context` after construction. Values that do
@@ -288,6 +308,25 @@ protected:
     */
     void shutdown_drain();
 
+    /// A closed descriptor waiting for the in-flight reactor pass to end.
+    struct retired_descriptor
+    {
+        scheduler_op* desc;
+        void (*release)(scheduler_op*, std::shared_ptr<void>&) noexcept;
+        std::shared_ptr<void> owner;
+    };
+
+    /// Typed release for `retire_descriptor`.
+    template<class DescState>
+    static void
+    release_retired(scheduler_op* desc, std::shared_ptr<void>& owner) noexcept
+    {
+        static_cast<DescState*>(desc)->hold_owner_if_enqueued(std::move(owner));
+    }
+
+    /// Release descriptors retired during the pass that just ended.
+    void release_retired_descriptors(lock_type& lock) const;
+
     /// RAII guard that re-inserts the task sentinel after `run_task`.
     struct task_cleanup
     {
@@ -304,6 +343,11 @@ protected:
     std::atomic<bool> stopped_{false};
     mutable std::atomic<bool> task_running_{false};
     mutable bool task_interrupted_ = false;
+
+    // Descriptors closed while a reactor pass was in flight (guarded by
+    // mutex_), and the reactor thread's buffer for releasing them.
+    mutable std::vector<retired_descriptor> retired_;
+    mutable std::vector<retired_descriptor> retired_releasing_;
 
     // Runtime-configurable reactor tuning parameters.
     // Defaults match the library's built-in values.
@@ -709,9 +753,54 @@ reactor_scheduler::post_deferred_completions(op_queue& ops) const
     wake_one_thread_and_unlock(lock);
 }
 
+template<class DescState>
+void
+reactor_scheduler::retire_descriptor(
+    DescState& desc, std::shared_ptr<void> owner) const noexcept
+{
+    {
+        lock_type lock(mutex_);
+        if (task_running_.load(std::memory_order_relaxed))
+        {
+            try
+            {
+                retired_.push_back({&desc, &release_retired<DescState>, owner});
+                return;
+            }
+            catch (...)
+            {
+                // Out of memory: the pass may still hold desc, so keep
+                // the owner alive for good rather than risk freeing it.
+                conditionally_enabled_mutex::scoped_lock dlock(desc.mutex);
+                desc.impl_ref_ = std::move(owner);
+                return;
+            }
+        }
+    }
+    desc.hold_owner_if_enqueued(std::move(owner));
+}
+
+inline void
+reactor_scheduler::release_retired_descriptors(lock_type& lock) const
+{
+    if (retired_.empty())
+        return;
+
+    // Only the thread that ran the pass gets here, before the task
+    // sentinel is queued again, so retired_releasing_ is not shared.
+    retired_releasing_.swap(retired_);
+    lock.unlock();
+    for (auto& r : retired_releasing_)
+        r.release(r.desc, r.owner);
+    // Dropping the owners may destroy the impls; keep the lock released.
+    retired_releasing_.clear();
+    lock.lock();
+}
+
 inline void
 reactor_scheduler::shutdown_drain()
 {
+    std::vector<retired_descriptor> retired;
     lock_type lock(mutex_);
 
     while (auto* h = completed_ops_.pop())
@@ -722,6 +811,10 @@ reactor_scheduler::shutdown_drain()
         h->destroy();
         lock.lock();
     }
+
+    // No pass runs during shutdown; the owners are dropped once the
+    // lock is released.
+    retired.swap(retired_);
 
     signal_all(lock);
 }
@@ -890,11 +983,18 @@ reactor_scheduler::do_one(
             }
             catch (...)
             {
+                if (!lock.owns_lock())
+                    lock.lock();
                 task_running_.store(false, std::memory_order_relaxed);
+                release_retired_descriptors(lock);
                 throw;
             }
 
+            // run_task may return without the lock (select's retry path).
+            if (!lock.owns_lock())
+                lock.lock();
             task_running_.store(false, std::memory_order_relaxed);
+            release_retired_descriptors(lock);
             completed_ops_.push(&task_op_);
             if (timeout_us > 0)
                 return 0;

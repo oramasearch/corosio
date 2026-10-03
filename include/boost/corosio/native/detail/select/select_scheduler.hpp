@@ -322,6 +322,11 @@ select_scheduler::run_task(
     fd_entry snapshot[FD_SETSIZE];
     int snapshot_count = 0;
 
+    // do_one releases the lock before a zero-timeout poll, but
+    // registered_descs_ is guarded by it.
+    if (!lock.owns_lock())
+        lock.lock();
+
     for (auto& [fd, desc] : registered_descs_)
     {
         if (snapshot_count < FD_SETSIZE)

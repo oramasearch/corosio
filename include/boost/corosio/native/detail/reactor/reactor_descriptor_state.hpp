@@ -135,6 +135,25 @@ struct reactor_descriptor_state : scheduler_op
         impl_ref_.reset();
     }
 
+    /** Keep @a owner alive while this state is queued.
+
+        Called through reactor_scheduler::retire_descriptor() for a
+        closed descriptor once no reactor pass can still hold it. If
+        the state is queued, @a owner moves into `impl_ref_` and is
+        released by the next invoke_deferred_io() or destroy();
+        otherwise it is dropped.
+
+        @param owner A strong reference to the object holding this state.
+            It may be the last one, so nothing here touches `*this`
+            after the mutex is released.
+    */
+    void hold_owner_if_enqueued(std::shared_ptr<void> owner) noexcept
+    {
+        conditionally_enabled_mutex::scoped_lock lock(mutex);
+        if (is_enqueued_.load(std::memory_order_acquire))
+            impl_ref_ = std::move(owner);
+    }
+
     /** Perform deferred I/O and queue completions.
 
         Performs I/O under the mutex and queues completed ops. EAGAIN

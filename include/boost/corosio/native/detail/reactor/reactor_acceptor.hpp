@@ -342,6 +342,7 @@ reactor_acceptor<Derived, Service, Op, AcceptOp, WaitOp, DescState, ImplBase, En
         repost(claimed_we, wait_er_);
     }
 
+    bool const was_registered = desc_state_.registered_events != 0;
     if (fd_ >= 0)
     {
         if (desc_state_.registered_events != 0)
@@ -354,6 +355,10 @@ reactor_acceptor<Derived, Service, Op, AcceptOp, WaitOp, DescState, ImplBase, En
     desc_state_.registered_events = 0;
 
     local_endpoint_ = Endpoint{};
+
+    // A reactor pass on another thread may still hold desc_state_.
+    if (self && was_registered)
+        svc_.scheduler().retire_descriptor(desc_state_, std::move(self));
 }
 
 template<
@@ -410,6 +415,7 @@ reactor_acceptor<Derived, Service, Op, AcceptOp, WaitOp, DescState, ImplBase, En
 
     native_handle_type released = fd_;
 
+    bool const was_registered = desc_state_.registered_events != 0;
     if (fd_ >= 0)
     {
         if (desc_state_.registered_events != 0)
@@ -421,6 +427,10 @@ reactor_acceptor<Derived, Service, Op, AcceptOp, WaitOp, DescState, ImplBase, En
     desc_state_.registered_events = 0;
 
     local_endpoint_ = Endpoint{};
+
+    // A reactor pass on another thread may still hold desc_state_.
+    if (self && was_registered)
+        svc_.scheduler().retire_descriptor(desc_state_, std::move(self));
 
     return released;
 }
