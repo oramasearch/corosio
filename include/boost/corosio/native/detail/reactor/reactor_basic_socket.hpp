@@ -408,6 +408,7 @@ reactor_basic_socket<Derived, ImplBase, Service, DescState, Endpoint>::
         }
     }
 
+    bool const was_registered = desc_state_.registered_events != 0;
     if (fd_ >= 0)
     {
         if (desc_state_.registered_events != 0)
@@ -420,6 +421,10 @@ reactor_basic_socket<Derived, ImplBase, Service, DescState, Endpoint>::
     desc_state_.registered_events = 0;
 
     local_endpoint_ = Endpoint{};
+
+    // A reactor pass on another thread may still hold desc_state_.
+    if (self && was_registered)
+        svc_.scheduler().retire_descriptor(desc_state_, std::move(self));
 }
 
 template<class Derived, class ImplBase, class Service, class DescState, class Endpoint>
@@ -476,6 +481,7 @@ reactor_basic_socket<Derived, ImplBase, Service, DescState, Endpoint>::
 
     native_handle_type released = fd_;
 
+    bool const was_registered = desc_state_.registered_events != 0;
     if (fd_ >= 0)
     {
         if (desc_state_.registered_events != 0)
@@ -488,6 +494,10 @@ reactor_basic_socket<Derived, ImplBase, Service, DescState, Endpoint>::
     desc_state_.registered_events = 0;
 
     local_endpoint_ = Endpoint{};
+
+    // A reactor pass on another thread may still hold desc_state_.
+    if (self && was_registered)
+        svc_.scheduler().retire_descriptor(desc_state_, std::move(self));
 
     return released;
 }
