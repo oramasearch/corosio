@@ -189,14 +189,42 @@ reactor_descriptor_state::invoke_deferred_io()
         }
 
         int err = 0;
+        // True when the error event carried no socket error. A parked
+        // read or write still fails with EIO (a hangup must surface, see
+        // zetta#740), but a parked connect checks its own state instead:
+        // epoll reports an open socket that has not started connecting
+        // as EPOLLOUT|EPOLLHUP, and that event may have been recorded
+        // before the connect started (oramasearch/corosio#10).
+        bool error_without_cause = false;
         if (ev & reactor_event_error)
         {
             socklen_t len = sizeof(err);
             if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
                 err = errno;
             if (err == 0)
-                err = EIO;
+            {
+                err                 = EIO;
+                error_without_cause = true;
+            }
         }
+
+        // Complete the parked connect, or leave it parked while the
+        // socket is still connecting (perform_io() reports EAGAIN).
+        auto finish_connect = [&]
+        {
+            auto* cn = connect_op;
+            if (err && !error_without_cause)
+                cn->complete(err, 0);
+            else
+                cn->perform_io();
+            if (cn->errn == EAGAIN || cn->errn == EWOULDBLOCK)
+            {
+                cn->errn = 0;
+                return;
+            }
+            connect_op = nullptr;
+            local_ops.push(cn);
+        };
 
         if (ev & reactor_event_read)
         {
@@ -234,15 +262,7 @@ reactor_descriptor_state::invoke_deferred_io()
         {
             bool had_write_op = (connect_op || write_op);
             if (connect_op)
-            {
-                auto* cn = connect_op;
-                if (err)
-                    cn->complete(err, 0);
-                else
-                    cn->perform_io();
-                connect_op = nullptr;
-                local_ops.push(cn);
-            }
+                finish_connect();
             if (write_op)
             {
                 auto* wr = write_op;
@@ -293,10 +313,7 @@ reactor_descriptor_state::invoke_deferred_io()
                 local_ops.push(std::exchange(write_op, nullptr));
             }
             if (connect_op)
-            {
-                connect_op->complete(err, 0);
-                local_ops.push(std::exchange(connect_op, nullptr));
-            }
+                finish_connect();
             if (wait_read_op)
             {
                 wait_read_op->complete(err, 0);
