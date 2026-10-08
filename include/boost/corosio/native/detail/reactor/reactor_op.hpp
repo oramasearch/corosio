@@ -147,6 +147,15 @@ struct reactor_op : reactor_op_base
     Checks SO_ERROR for connect completion status. The operator()()
     and cancel() are provided by the concrete backend type.
 
+    A readiness event is not proof that the connect finished. epoll
+    reports an open TCP socket that has not started connecting as
+    EPOLLOUT|EPOLLHUP, and that event can be recorded before the
+    connect starts and delivered after it is parked
+    (oramasearch/corosio#10). So when SO_ERROR is 0, perform_io()
+    also asks getpeername() whether the socket is connected; if it
+    is not, the op completes with EAGAIN, which keeps it parked
+    until the next edge.
+
     @tparam Base The backend's base op type.
     @tparam Endpoint The endpoint type (endpoint or local_endpoint).
 */
@@ -169,7 +178,25 @@ struct reactor_connect_op : Base
         socklen_t len = sizeof(err);
         if (::getsockopt(this->fd, SOL_SOCKET, SO_ERROR, &err, &len) < 0)
             err = errno;
+        if (err == 0)
+            err = connect_state(this->fd);
         this->complete(err, 0);
+    }
+
+    /** Return 0 once the connect has established the socket.
+
+        Returns EAGAIN while the socket is still connecting
+        (getpeername() reports ENOTCONN), which tells a readiness
+        event that predates the connect apart from its completion.
+        Any other getpeername() failure is returned as the error.
+    */
+    static int connect_state(int fd) noexcept
+    {
+        sockaddr_storage peer{};
+        socklen_t peer_len = sizeof(peer);
+        if (::getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &peer_len) == 0)
+            return 0;
+        return errno == ENOTCONN ? EAGAIN : errno;
     }
 };
 
