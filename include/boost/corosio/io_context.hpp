@@ -579,12 +579,12 @@ public:
     /** Dispatch a continuation.
 
         Returns a handle for symmetric transfer. If called from
-        within `run()`, returns `c.h`. Otherwise posts the
-        enclosing continuation_op as a scheduler_op for later
-        execution and returns `std::noop_coroutine()`.
+        within `run()`, returns `c.h`. Otherwise posts it as
+        `post(c)` does and returns `std::noop_coroutine()`.
 
-        @param c The continuation to dispatch. Must be the `cont`
-                 member of a `detail::continuation_op`.
+        @param c The continuation to dispatch. It may be the
+                 `cont` member of a `detail::continuation_op` or
+                 a bare continuation.
 
         @return A handle for symmetric transfer or `std::noop_coroutine()`.
     */
@@ -598,10 +598,13 @@ public:
 
     /** Post a continuation for deferred execution.
 
-        If the continuation is backed by a continuation_op
-        (tagged), posts it directly as a scheduler_op — zero
-        heap allocation. Otherwise falls back to the
-        heap-allocating post(coroutine_handle<>) path.
+        If the continuation is the `cont` member of a
+        continuation_op (marked through its `next` field), posts
+        the op directly as a scheduler_op — zero heap allocation.
+        Otherwise falls back to the heap-allocating
+        post(coroutine_handle<>) path. Only `c` itself is read;
+        a bare continuation is safe at any address
+        (oramasearch/corosio#12).
     */
     void post(capy::continuation& c) const
     {

@@ -14,8 +14,7 @@
 #include <boost/capy/continuation.hpp>
 
 #include <atomic>
-#include <cstdint>
-#include <cstring>
+#include <cstddef>
 
 namespace boost::corosio::detail {
 
@@ -29,19 +28,33 @@ namespace boost::corosio::detail {
 
    io_context::executor_type::post(continuation&) uses
    try_from_continuation() to recover the enclosing
-   continuation_op via a magic tag. The tag is read through
-   memcpy (not through a continuation_op*) so that UBSan
-   does not flag the speculative pointer arithmetic when the
-   continuation is not actually inside a continuation_op.
+   continuation_op. The mark is carried inside the
+   continuation itself: the constructor points cont.next at
+   a private marker object that no executor ever queues.
+   A bare capy::continuation (capy's run_async, when_all and
+   when_any runners) never holds that address, so the check
+   reads only the continuation it was given. It used to read
+   a tag 8 bytes before the continuation, which faulted when
+   a bare continuation started a page whose previous page was
+   unmapped, and could take a bare continuation for a
+   continuation_op when those bytes happened to match
+   (oramasearch/corosio#12).
+
+   Executors own `next` while a continuation is queued. When
+   a continuation_op's cont is posted to another executor
+   (a capy thread_pool or strand), that executor overwrites
+   the mark. A later post of the same continuation to an
+   io_context then takes the heap-allocating fallback path,
+   which is correct, only slower.
 */
 struct continuation_op final : scheduler_op
 {
-    static constexpr std::uint32_t magic_ = 0xC0710Au;
-
-    std::uint32_t tag_ = magic_;
     capy::continuation cont;
 
-    continuation_op() noexcept : scheduler_op(&do_complete) {}
+    continuation_op() noexcept : scheduler_op(&do_complete)
+    {
+        cont.next = marker();
+    }
 
     // Reactor backends (epoll, select, kqueue) dispatch through
     // virtual operator()(). IOCP dispatches through func_ which
@@ -79,12 +92,25 @@ private:
 
 public:
 
+    // The address continuation_op stores in cont.next to mark
+    // its continuation. Nothing ever queues this object, so no
+    // executor links a continuation to it.
+    static capy::continuation* marker() noexcept
+    {
+        static capy::continuation m;
+        return &m;
+    }
+
     // Recover the enclosing continuation_op from its cont member.
-    // Returns nullptr if the continuation is not tagged (bare
-    // capy::continuation from capy internals like run_async).
+    // Returns nullptr if the continuation is not marked (a bare
+    // capy::continuation from capy internals like run_async or
+    // when_all, or a continuation_op whose mark another executor
+    // overwrote). Reads only `c`.
     static continuation_op* try_from_continuation(
         capy::continuation& c) noexcept
     {
+        if (c.next != marker())
+            return nullptr;
         // offsetof on non-standard-layout is conditionally-supported;
         // suppress the warning — all targeted compilers handle this
         // correctly and the self-relative arithmetic is move-safe.
@@ -93,18 +119,10 @@ public:
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
 #endif
         constexpr auto cont_off = offsetof(continuation_op, cont);
-        constexpr auto tag_off  = offsetof(continuation_op, tag_);
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-        // Read the tag through memcpy from a char*, not through a
-        // continuation_op*. This avoids UBSan's vptr check when
-        // the continuation is not actually inside a continuation_op.
         auto* base = reinterpret_cast<char*>(&c) - cont_off;
-        std::uint32_t tag;
-        std::memcpy(&tag, base + tag_off, sizeof(tag));
-        if (tag != magic_)
-            return nullptr;
         return reinterpret_cast<continuation_op*>(base);
     }
 };
