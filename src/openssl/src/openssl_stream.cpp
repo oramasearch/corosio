@@ -687,7 +687,7 @@ struct openssl_stream::impl
                     else
                     {
                         unsigned long ssl_err = ERR_get_error();
-                        ec = make_openssl_error(ssl_err);
+                        ec                    = make_openssl_error(ssl_err);
                         co_return {ec, total_read};
                     }
                 }
@@ -748,7 +748,7 @@ struct openssl_stream::impl
                     else
                     {
                         unsigned long ssl_err = ERR_get_error();
-                        ec = make_openssl_error(ssl_err);
+                        ec                    = make_openssl_error(ssl_err);
                         co_return {ec, total_written};
                     }
                 }
@@ -803,7 +803,7 @@ struct openssl_stream::impl
                 else
                 {
                     unsigned long ssl_err = ERR_get_error();
-                    ec = make_handshake_error(ssl_, ssl_err);
+                    ec                    = make_handshake_error(ssl_, ssl_err);
                     co_return {ec};
                 }
             }

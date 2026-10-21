@@ -283,7 +283,7 @@ struct openssl_stream_test
     {
         using namespace test;
 
-        auto dir = make_temp_dir("default-verify");
+        auto dir     = make_temp_dir("default-verify");
         auto ca_file = dir / "ca.pem";
         write_file(ca_file, ca_cert_pem);
 
@@ -308,7 +308,7 @@ struct openssl_stream_test
 
         auto dir = make_temp_dir("verify-path");
 
-        BIO* bio = BIO_new_mem_buf(ca_cert_pem, -1);
+        BIO* bio   = BIO_new_mem_buf(ca_cert_pem, -1);
         X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
         BIO_free(bio);
         BOOST_TEST(cert != nullptr);
@@ -356,7 +356,7 @@ struct openssl_stream_test
 
         // From a file
         {
-            auto dir = make_temp_dir("ca-bundle");
+            auto dir  = make_temp_dir("ca-bundle");
             auto file = dir / "bundle.pem";
             write_file(file, bundle.c_str());
 
@@ -387,8 +387,8 @@ struct openssl_stream_test
         auto server_ctx = make_server_context();
 
         auto [s1, s2] = corosio::test::make_socket_pair(ioc);
-        auto client = make_stream(s1, client_ctx);
-        auto server = make_stream(s2, server_ctx);
+        auto client   = make_stream(s1, client_ctx);
+        auto server   = make_stream(s2, server_ctx);
 
         std::error_code client_ec;
         auto client_task = [&]() -> capy::task<> {
