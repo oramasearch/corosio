@@ -262,6 +262,18 @@ public:
                 static_cast<long>(ca.size()), WOLFSSL_FILETYPE_PEM);
         }
 
+#ifndef NO_FILESYSTEM
+        // add_verify_path(): certificate directories
+        for (auto const& path : cd.verify_paths)
+            wolfSSL_CTX_load_verify_locations(ctx, nullptr, path.c_str());
+#endif
+
+#ifdef WOLFSSL_SYS_CA_CERTS
+        // set_default_verify_paths(): the platform trust store
+        if (cd.use_default_verify_paths)
+            wolfSSL_CTX_load_system_CA_certs(ctx);
+#endif
+
         // Apply verify depth
         wolfSSL_CTX_set_verify_depth(ctx, cd.verify_depth);
     }
