@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <string_view>
+#include <vector>
 
 namespace boost::corosio {
 
@@ -173,6 +174,23 @@ public:
         @return The selected ALPN protocol, or an empty view.
     */
     virtual std::string_view selected_alpn() const noexcept = 0;
+
+    /** Returns the certificate the peer presented, DER-encoded.
+
+        After a successful handshake this is the leaf certificate the
+        peer sent. It is empty before a handshake, after `reset()`, and
+        when the peer presented no certificate (a client when the
+        server does not request one). The certificate has passed the
+        context's verification only when the verify mode demanded it;
+        with `tls_verify_mode::none` it is returned unverified.
+
+        Use it to bind an identity the peer states inside the protocol
+        (a node id, a user name) to the identity its certificate proves.
+
+        @return The DER bytes of the peer's certificate, or an empty
+            vector.
+    */
+    virtual std::vector<unsigned char> peer_certificate_der() const = 0;
 
     /** Returns the name of the TLS backend.
 

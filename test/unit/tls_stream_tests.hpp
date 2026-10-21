@@ -289,6 +289,127 @@ testAlpn(StreamFactory make_stream)
     runAlpnTest(make_stream, {"http/1.1"}, {"h2"}, "");
 }
 
+/** Decode the first certificate of a PEM block to DER (test helper). */
+inline std::vector<unsigned char>
+pem_certificate_to_der(std::string_view pem)
+{
+    constexpr std::string_view begin = "-----BEGIN CERTIFICATE-----";
+    constexpr std::string_view end   = "-----END CERTIFICATE-----";
+    auto const first                 = pem.find(begin);
+    auto const last                  = pem.find(end);
+    if (first == std::string_view::npos || last == std::string_view::npos)
+        return {};
+    std::string_view body = pem.substr(
+        first + begin.size(), last - first - begin.size());
+
+    auto value = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z')
+            return c - 'A';
+        if (c >= 'a' && c <= 'z')
+            return c - 'a' + 26;
+        if (c >= '0' && c <= '9')
+            return c - '0' + 52;
+        if (c == '+')
+            return 62;
+        if (c == '/')
+            return 63;
+        return -1;
+    };
+    std::vector<unsigned char> der;
+    unsigned int bits = 0;
+    int count         = 0;
+    for (char c : body)
+    {
+        int const v = value(c);
+        if (v < 0)
+            continue; // whitespace and '=' padding
+        bits = (bits << 6) | static_cast<unsigned int>(v);
+        count += 6;
+        if (count >= 8)
+        {
+            count -= 8;
+            der.push_back(static_cast<unsigned char>((bits >> count) & 0xff));
+        }
+    }
+    return der;
+}
+
+/** Run one handshake and check the certificate each side reports. */
+template<typename StreamFactory>
+void
+runPeerCertificateTest(
+    StreamFactory make_stream,
+    tls_context client_ctx,
+    tls_context server_ctx,
+    std::vector<unsigned char> const& expected_at_client,
+    std::vector<unsigned char> const& expected_at_server)
+{
+    io_context ioc;
+    auto [client_socket, server_socket] = corosio::test::make_socket_pair(ioc);
+
+    auto client = make_stream(client_socket, client_ctx);
+    auto server = make_stream(server_socket, server_ctx);
+
+    // Nothing before a handshake.
+    BOOST_TEST(client.peer_certificate_der().empty());
+    BOOST_TEST(server.peer_certificate_der().empty());
+
+    std::error_code client_ec;
+    std::error_code server_ec;
+    auto client_task = [&]() -> capy::task<> {
+        auto [ec] = co_await client.handshake(tls_stream::client);
+        client_ec = ec;
+    };
+    auto server_task = [&]() -> capy::task<> {
+        auto [ec] = co_await server.handshake(tls_stream::server);
+        server_ec = ec;
+    };
+    capy::run_async(ioc.get_executor())(client_task());
+    capy::run_async(ioc.get_executor())(server_task());
+    ioc.run();
+
+    BOOST_TEST(!client_ec);
+    BOOST_TEST(!server_ec);
+    if (!client_ec && !server_ec)
+    {
+        tls_stream const& client_stream = client;
+        tls_stream const& server_stream = server;
+        BOOST_TEST(client_stream.peer_certificate_der() == expected_at_client);
+        BOOST_TEST(server_stream.peer_certificate_der() == expected_at_server);
+    }
+
+    // reset() forgets the session, and the peer's certificate with it.
+    client.reset();
+    server.reset();
+    BOOST_TEST(client.peer_certificate_der().empty());
+    BOOST_TEST(server.peer_certificate_der().empty());
+
+    client_socket.close();
+    server_socket.close();
+}
+
+/** Test that each side can read the certificate its peer presented. */
+template<typename StreamFactory>
+void
+testPeerCertificate(StreamFactory make_stream)
+{
+    auto const server_der = pem_certificate_to_der(chain_server_cert_pem);
+    auto const client_der = pem_certificate_to_der(client_cert_pem);
+    BOOST_TEST(!server_der.empty());
+    BOOST_TEST(!client_der.empty());
+
+    // Mutual TLS: each side sees the other's leaf certificate.
+    runPeerCertificateTest(
+        make_stream, make_mtls_client_context(), make_mtls_server_context(),
+        server_der, client_der);
+
+    // Server-only TLS: the client sees the server's certificate, the server
+    // sees none because the client presented none.
+    runPeerCertificateTest(
+        make_stream, make_chain_client_context(), make_chain_server_context(),
+        server_der, {});
+}
+
 /** Test TLS success cases with certificate verification.
 
     These tests run without fuse injection to verify basic functionality

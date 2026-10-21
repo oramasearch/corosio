@@ -1130,6 +1130,29 @@ wolfssl_stream::selected_alpn() const noexcept
 #endif
 }
 
+std::vector<unsigned char>
+wolfssl_stream::peer_certificate_der() const
+{
+#ifdef SESSION_CERTS
+    if (!impl_ || !impl_->ssl_)
+        return {};
+
+    // The peer chain is owned by the WOLFSSL object; entry 0 is the leaf.
+    WOLFSSL_X509_CHAIN* chain = wolfSSL_get_peer_chain(impl_->ssl_);
+    if (!chain || wolfSSL_get_chain_count(chain) < 1)
+        return {};
+
+    unsigned char const* der = wolfSSL_get_chain_cert(chain, 0);
+    int const size           = wolfSSL_get_chain_length(chain, 0);
+    if (!der || size <= 0)
+        return {};
+    return std::vector<unsigned char>(der, der + size);
+#else
+    // Without SESSION_CERTS WolfSSL keeps no copy of the peer's chain.
+    return {};
+#endif
+}
+
 std::string_view
 wolfssl_stream::name() const noexcept
 {

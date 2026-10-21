@@ -189,6 +189,13 @@ public:
     */
     std::string_view selected_alpn() const noexcept override;
 
+    /** Return the DER-encoded certificate the peer presented.
+
+        @return The peer's leaf certificate, or an empty vector when
+            none was presented or no handshake has completed.
+    */
+    std::vector<unsigned char> peer_certificate_der() const override;
+
     /// Return the TLS backend name ("wolfssl").
     std::string_view name() const noexcept override;
 
