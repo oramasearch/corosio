@@ -12,6 +12,13 @@
 
 #include "tls_stream_tests.hpp"
 
+#include <boost/capy/read.hpp>
+#include <boost/capy/write.hpp>
+#include <boost/corosio/timer.hpp>
+
+#include <chrono>
+#include <string>
+
 #ifdef BOOST_COROSIO_HAS_OPENSSL
 
 namespace boost::corosio {
@@ -103,6 +110,102 @@ struct openssl_stream_test
         }
     }
 
+    /** Test that a read and a write outstanding at once both progress.
+
+        Each side runs one writer and one reader concurrently, the
+        pattern openssl_stream documents. Both writers send far more than
+        the socket buffers hold, and both readers start before any data
+        has arrived. Neither write can finish until the peer reads, so a
+        stream that lets a pending read hold back its write (or a pending
+        write hold back its read) delivers nothing. A watchdog closes the
+        sockets at the deadline so a stall fails instead of hanging.
+    */
+    void testFullDuplex()
+    {
+        using namespace test;
+
+        constexpr std::size_t payload_bytes = 32 * 1024 * 1024;
+
+        io_context ioc;
+        auto [client_socket, server_socket] = make_socket_pair(ioc);
+        auto client_ctx = make_client_context();
+        auto server_ctx = make_server_context();
+        auto client = make_stream(client_socket, client_ctx);
+        auto server = make_stream(server_socket, server_ctx);
+
+        std::error_code client_handshake, server_handshake;
+        auto hsc = [&]() -> capy::task<> {
+            auto [ec] = co_await client.handshake(tls_stream::client);
+            client_handshake = ec;
+        };
+        auto hss = [&]() -> capy::task<> {
+            auto [ec] = co_await server.handshake(tls_stream::server);
+            server_handshake = ec;
+        };
+        capy::run_async(ioc.get_executor())(hsc());
+        capy::run_async(ioc.get_executor())(hss());
+        ioc.run();
+        ioc.restart();
+        BOOST_TEST(!client_handshake);
+        BOOST_TEST(!server_handshake);
+        if (client_handshake || server_handshake)
+            return;
+
+        std::string const client_payload(payload_bytes, 'c');
+        std::string const server_payload(payload_bytes, 's');
+        std::string client_received(payload_bytes, '\0');
+        std::string server_received(payload_bytes, '\0');
+        std::size_t client_read = 0, server_read = 0;
+        std::size_t client_written = 0, server_written = 0;
+        int finished = 0;
+
+        auto writer = [&](openssl_stream& stream, std::string const& payload,
+                          std::size_t& written) -> capy::task<> {
+            auto [ec, n] = co_await capy::write(
+                stream, capy::const_buffer(payload.data(), payload.size()));
+            written = n;
+            ++finished;
+        };
+        auto reader = [&](openssl_stream& stream, std::string& into,
+                          std::size_t& read) -> capy::task<> {
+            auto [ec, n] = co_await capy::read(
+                stream, capy::mutable_buffer(into.data(), into.size()));
+            read = n;
+            ++finished;
+        };
+        auto watchdog = [&]() -> capy::task<> {
+            timer deadline(ioc);
+            auto const started = std::chrono::steady_clock::now();
+            while (finished < 4 &&
+                   std::chrono::steady_clock::now() - started <
+                       std::chrono::seconds(30))
+            {
+                deadline.expires_after(std::chrono::milliseconds(20));
+                (void)co_await deadline.wait();
+            }
+            client_socket.close();
+            server_socket.close();
+        };
+
+        capy::run_async(ioc.get_executor())(
+            reader(client, client_received, client_read));
+        capy::run_async(ioc.get_executor())(
+            reader(server, server_received, server_read));
+        capy::run_async(ioc.get_executor())(
+            writer(client, client_payload, client_written));
+        capy::run_async(ioc.get_executor())(
+            writer(server, server_payload, server_written));
+        capy::run_async(ioc.get_executor())(watchdog());
+        ioc.run();
+
+        BOOST_TEST_EQ(client_written, payload_bytes);
+        BOOST_TEST_EQ(server_written, payload_bytes);
+        BOOST_TEST_EQ(client_read, payload_bytes);
+        BOOST_TEST_EQ(server_read, payload_bytes);
+        BOOST_TEST(client_received == server_payload);
+        BOOST_TEST(server_received == client_payload);
+    }
+
     void run()
     {
         test::testHandshakeFuse(make_stream);
@@ -125,6 +228,7 @@ struct openssl_stream_test
         test::testResetFuse(make_stream);
 
         testCertificateChain();
+        testFullDuplex();
         testName();
         testNextLayer();
     }
