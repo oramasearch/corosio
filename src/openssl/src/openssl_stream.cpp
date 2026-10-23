@@ -53,6 +53,25 @@
     Renegotiation causes cross-direction I/O: SSL_read may need to write
     handshake data, SSL_write may need to read. Each operation handles
     whatever I/O direction OpenSSL requests.
+
+    Full Duplex
+    -----------
+    One read_some and one write_some may be outstanding at once, on one
+    executor. The SSL calls themselves never suspend, so they cannot
+    overlap; only the socket I/O between them does. Socket reads and socket
+    writes therefore take separate locks, so a read waiting for the peer
+    never holds back a write, and a write waiting for socket space never
+    holds back a read:
+
+      read_cm_   in_buf_, s_.read_some, BIO_write(ext_bio_)
+      write_cm_  out_buf_, BIO_read(ext_bio_), s_.write_some
+
+    Ciphertext leaves ext_bio_ in the order OpenSSL produced it because it
+    is taken from the BIO and written under write_cm_. A read that finds
+    output pending while a write holds write_cm_ leaves it to that write,
+    whose flush loop drains the BIO before releasing the lock. A read never
+    waits behind a write that is itself waiting for the peer to read: two
+    peers doing that to each other would never make progress.
 */
 
 namespace boost::corosio {
@@ -383,7 +402,9 @@ struct openssl_stream::impl
     std::vector<char> in_buf_;
     std::vector<char> out_buf_;
 
-    capy::async_mutex io_cm_;
+    // See "Full Duplex" above.
+    capy::async_mutex read_cm_;
+    capy::async_mutex write_cm_;
 
     impl(capy::any_stream& s, tls_context ctx) : s_(s), ctx_(std::move(ctx))
     {
@@ -421,6 +442,13 @@ struct openssl_stream::impl
 
     capy::task<std::error_code> flush_output()
     {
+        if (BIO_ctrl_pending(ext_bio_) == 0)
+            co_return std::error_code{};
+
+        auto [lec] = co_await write_cm_.lock();
+        if (lec)
+            co_return lec;
+        capy::async_mutex::lock_guard write_guard(&write_cm_);
         while (BIO_ctrl_pending(ext_bio_) > 0)
         {
             std::size_t got = 0;
@@ -436,26 +464,33 @@ struct openssl_stream::impl
             if (got == 0)
                 break;
 
-            {
-                auto [lec] = co_await io_cm_.lock();
-                if (lec)
-                    co_return lec;
-                capy::async_mutex::lock_guard io_guard(&io_cm_);
-                auto [ec, n] = co_await capy::write(
-                    s_, capy::const_buffer(out_buf_.data(), got));
-                if (ec)
-                    co_return ec;
-            }
+            auto [ec, n] = co_await capy::write(
+                s_, capy::const_buffer(out_buf_.data(), got));
+            if (ec)
+                co_return ec;
         }
         co_return std::error_code{};
     }
 
+    // The flush a read performs before it waits for more input. Output that
+    // SSL_read produced (a key update, an alert) is sent here only when no
+    // write is in progress; otherwise the write in progress sends it, because
+    // its flush loop runs until ext_bio_ is empty. Waiting for write_cm_
+    // instead would park this read behind a write that may itself be waiting
+    // for the peer to read.
+    capy::task<std::error_code> flush_output_from_read()
+    {
+        if (write_cm_.is_locked())
+            co_return std::error_code{};
+        co_return co_await flush_output();
+    }
+
     capy::task<std::error_code> read_input()
     {
-        auto [lec] = co_await io_cm_.lock();
+        auto [lec] = co_await read_cm_.lock();
         if (lec)
             co_return lec;
-        capy::async_mutex::lock_guard io_guard(&io_cm_);
+        capy::async_mutex::lock_guard read_guard(&read_cm_);
         auto [ec, n] = co_await s_.read_some(
             capy::mutable_buffer(in_buf_.data(), in_buf_.size()));
         if (ec)
@@ -501,13 +536,15 @@ struct openssl_stream::impl
 
                     if (err == SSL_ERROR_WANT_WRITE)
                     {
+                        // The BIO is full: SSL_read cannot continue until it
+                        // is drained, so this read must wait for the flush.
                         ec = co_await flush_output();
                         if (ec)
                             co_return {ec, total_read};
                     }
                     else if (err == SSL_ERROR_WANT_READ)
                     {
-                        ec = co_await flush_output();
+                        ec = co_await flush_output_from_read();
                         if (ec)
                             co_return {ec, total_read};
 
