@@ -227,6 +227,26 @@ The returned view remains valid until the stream is reset or destroyed.
 
 WolfSSL must be built with `HAVE_ALPN` to negotiate application protocols.
 
+==== Peer Certificate
+
+After a successful handshake, `peer_certificate_der()` returns the DER encoding
+of the leaf certificate the peer presented. Use it to bind an identity the peer
+states inside your protocol to the identity its certificate proves:
+
+[source,cpp]
+----
+(co_await secure.handshake(tls_stream::server)).value();
+
+std::vector<unsigned char> der = secure.peer_certificate_der();
+// Parse with your X.509 library and compare its subject to the
+// identity the peer claims.
+----
+
+It is empty before a handshake, after `reset()`, and when the peer presented no
+certificate. The certificate has been verified only if the verify mode required
+it. WolfSSL must be built with `SESSION_CERTS` to keep the peer's certificate;
+without it the accessor returns an empty vector.
+
 === Certificate Verification
 
 ==== Verification Mode

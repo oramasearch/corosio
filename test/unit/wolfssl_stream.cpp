@@ -130,6 +130,9 @@ struct wolfssl_stream_test
 #ifdef HAVE_ALPN
         test::testAlpn(make_stream);
 #endif
+#ifdef SESSION_CERTS
+        test::testPeerCertificate(make_stream);
+#endif
 
         test::testReset(make_stream, cert_modes);
         test::testResetViaHandshake(make_stream, cert_modes);

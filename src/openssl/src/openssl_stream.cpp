@@ -861,6 +861,35 @@ openssl_stream::selected_alpn() const noexcept
     return {reinterpret_cast<char const*>(protocol), size};
 }
 
+std::vector<unsigned char>
+openssl_stream::peer_certificate_der() const
+{
+    if (!impl_ || !impl_->ssl_)
+        return {};
+
+    // SSL_get1 returns a reference the caller owns. Before a handshake, and
+    // after SSL_clear(), there is no peer certificate and it returns null.
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    X509* certificate = SSL_get1_peer_certificate(impl_->ssl_);
+#else
+    X509* certificate = SSL_get_peer_certificate(impl_->ssl_);
+#endif
+    if (!certificate)
+        return {};
+
+    std::vector<unsigned char> der;
+    int const size = i2d_X509(certificate, nullptr);
+    if (size > 0)
+    {
+        der.resize(static_cast<std::size_t>(size));
+        unsigned char* out = der.data();
+        if (i2d_X509(certificate, &out) != size)
+            der.clear();
+    }
+    X509_free(certificate);
+    return der;
+}
+
 std::string_view
 openssl_stream::name() const noexcept
 {
