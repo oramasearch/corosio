@@ -194,7 +194,7 @@ reactor_descriptor_state::invoke_deferred_io()
         // but a parked connect checks its own state instead:
         // epoll reports an open socket that has not started connecting
         // as EPOLLOUT|EPOLLHUP, and that event may have been recorded
-        // before the connect started (oramasearch/corosio#10).
+        // before the connect started.
         bool error_without_cause = false;
         if (ev & reactor_event_error)
         {

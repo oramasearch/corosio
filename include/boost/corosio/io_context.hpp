@@ -603,8 +603,7 @@ public:
         the op directly as a scheduler_op — zero heap allocation.
         Otherwise falls back to the heap-allocating
         post(coroutine_handle<>) path. Only `c` itself is read;
-        a bare continuation is safe at any address
-        (oramasearch/corosio#12).
+        a bare continuation is safe at any address.
     */
     void post(capy::continuation& c) const
     {

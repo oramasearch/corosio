@@ -1,6 +1,6 @@
 # Descriptor registration order and the work count
 
-Applies to the kqueue and epoll backends. Fork change for oramasearch/corosio#7.
+Applies to the kqueue and epoll backends. A change carried by this fork.
 
 ## The problem
 

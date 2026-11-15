@@ -150,8 +150,7 @@ struct reactor_op : reactor_op_base
     A readiness event is not proof that the connect finished. epoll
     reports an open TCP socket that has not started connecting as
     EPOLLOUT|EPOLLHUP, and that event can be recorded before the
-    connect starts and delivered after it is parked
-    (oramasearch/corosio#10). So when SO_ERROR is 0, perform_io()
+    connect starts and delivered after it is parked. So when SO_ERROR is 0, perform_io()
     also asks getpeername() whether the socket is connected; if it
     is not, the op completes with EAGAIN, which keeps it parked
     until the next edge.

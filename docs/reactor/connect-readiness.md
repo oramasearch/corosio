@@ -1,7 +1,6 @@
 # A connect started after its socket was registered
 
-Applies to the reactor backends (epoll, kqueue, select). Fork change for
-oramasearch/corosio#10, found by a downstream application.
+Applies to the reactor backends (epoll, kqueue, select). A change carried by this fork.
 
 ## The problem
 

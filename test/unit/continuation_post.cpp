@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2026 OramaSearch, Inc.
+// Copyright (c) 2026 Steve Sperandeo
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,7 +8,6 @@
 //
 
 // Posting a bare capy::continuation reads only the continuation
-// (oramasearch/corosio#12).
 //
 // io_context::executor_type::post(continuation&) asks whether the
 // continuation is the cont member of a continuation_op. It used to answer

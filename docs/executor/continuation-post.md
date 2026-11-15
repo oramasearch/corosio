@@ -1,7 +1,6 @@
 # Posting a continuation reads only the continuation
 
-Applies to `io_context::executor_type::post(capy::continuation&)` and `dispatch`. Fork change for
-oramasearch/corosio#12, found by a downstream application.
+Applies to `io_context::executor_type::post(capy::continuation&)` and `dispatch`. A change carried by this fork.
 
 ## The problem
 

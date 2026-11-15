@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2026 OramaSearch, Inc.
+// Copyright (c) 2026 Steve Sperandeo
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -8,7 +8,7 @@
 //
 
 // A connect started some time after its socket was opened and registered
-// with the reactor (oramasearch/corosio#10).
+// with the reactor.
 //
 // tcp_socket::connect() opens the socket when the awaitable is created.
 // On Linux, epoll reports a TCP socket that is open but not yet connecting
