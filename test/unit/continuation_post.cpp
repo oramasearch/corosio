@@ -8,14 +8,13 @@
 //
 
 // Posting a bare capy::continuation reads only the continuation
-// (oramasearch/corosio#12).
 //
 // io_context::executor_type::post(continuation&) asks whether the
 // continuation is the cont member of a continuation_op. It used to answer
 // by reading a tag 8 bytes before the continuation. Capy's range when_all
 // and when_any post bare continuations from a heap array, so for the first
 // element that read landed before the block: it faulted when the block
-// started a page whose previous page was unmapped (lake#604, a segfault at
+// started a page whose previous page was unmapped (a segfault at
 // 0x5ffffffffff8, the start of the macOS nano zone minus 8), and it took
 // the continuation for a continuation_op when those bytes held the tag.
 // These tests place a bare continuation at the start of a page behind a
@@ -201,7 +200,7 @@ public:
 
 struct continuation_post_test
 {
-    // The reproduction from corosio#12: a bare continuation at the start
+    // The reproduction: a bare continuation at the start
     // of a page whose previous page is unmapped, posted through the
     // concrete executor.
     void testBareContinuationAfterGuardPage()
@@ -322,7 +321,7 @@ struct continuation_post_test
         BOOST_TEST_EQ(ran, 1);
     }
 
-    // The path lake#604 crashed on: when_all over a vector of tasks posts
+    // The path the crash took: when_all over a vector of tasks posts
     // each runner's bare continuation through the io_context executor.
     void testWhenAllOverManyTasks()
     {

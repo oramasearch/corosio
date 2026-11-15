@@ -37,8 +37,7 @@ namespace boost::corosio::detail {
    a tag 8 bytes before the continuation, which faulted when
    a bare continuation started a page whose previous page was
    unmapped, and could take a bare continuation for a
-   continuation_op when those bytes happened to match
-   (oramasearch/corosio#12).
+   continuation_op when those bytes happened to match.
 
    Executors own `next` while a continuation is queued. When
    a continuation_op's cont is posted to another executor

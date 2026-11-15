@@ -246,7 +246,7 @@ epoll_scheduler::register_descriptor(int fd, reactor_descriptor_state* desc) con
     epoll_event ev{};
     // EPOLLRDHUP detects a peer half-close (shutdown(SHUT_WR)); with EPOLLHUP it lets
     // run_task() surface a hangup to a parked op so the fd is closed promptly instead
-    // of re-firing (see the event translation in run_task — oramasearch/zetta#740).
+    // of re-firing (see the event translation in run_task).
     ev.events   = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
     ev.data.ptr = desc;
 
@@ -390,8 +390,8 @@ epoll_scheduler::run_task(
         // EPOLLHUP and EPOLLRDHUP do NOT — and epoll reports them on EVERY wait
         // (level-persistent, and unmaskable via the interest set) until the fd is
         // closed. Passing them through raw left them unconsumed: a hung-up fd with
-        // a parked read/write op would re-wake the reactor forever at 100% CPU
-        // (issue oramasearch/zetta#740). Map a hangup so a parked op completes with
+        // a parked read/write op would re-wake the reactor forever at 100% CPU.
+        // Map a hangup so a parked op completes with
         // an error and the owner closes the fd (which deregisters it, ending the
         // storm). EPOLLHUP = both directions gone → wake read, write, and error;
         // EPOLLRDHUP = peer closed its write end → the read will see EOF.

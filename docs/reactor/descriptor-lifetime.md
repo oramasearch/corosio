@@ -1,7 +1,6 @@
 # Descriptor state lifetime across reactor passes
 
-Applies to the reactor backends (kqueue, epoll, select). Fork change for
-oramasearch/corosio#5.
+Applies to the reactor backends (kqueue, epoll, select). A change carried by this fork.
 
 ## The problem
 

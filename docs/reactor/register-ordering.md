@@ -1,6 +1,6 @@
 # Descriptor registration order and the work count
 
-Applies to the kqueue and epoll backends. Fork change for oramasearch/corosio#7.
+Applies to the kqueue and epoll backends. A change carried by this fork.
 
 ## The problem
 
@@ -21,7 +21,7 @@ matching decrement in `work_cleanup` still happened, so each occurrence left
 The symptoms:
 
 - the count reached zero while work was pending, so `run()` stopped early;
-- in the end it was negative (-5 in the liquid#329 hang), and `do_one` never saw
+- in the end it was negative (-5 in the reported hang), and `do_one` never saw
   exactly zero, so `run()` never returned;
 - the late `ready_events_.store(0)` could also erase an edge the pass had just
   recorded.
@@ -42,7 +42,7 @@ Two Debug assertions guard the invariant:
 
 ## How it was found
 
-Instrumentation of the liquid test was used:
+Instrumentation of the failing downstream test was used:
 
 - a per-operation ledger of starts, posts, finishes and consumptions;
 - a check that each descriptor-state invocation paid for its consumption, either
