@@ -242,8 +242,10 @@ public:
         the close looked at `is_enqueued_`. Call this after the
         descriptor has been deregistered: if a pass is in flight,
         @a owner is held until that pass ends; then (or at once, if
-        no pass is running) the descriptor state keeps @a owner in
-        `impl_ref_` when it is queued, and drops it otherwise.
+        no pass is running) the descriptor state keeps @a owner when it
+        is queued, and it is dropped otherwise. That decision is made
+        under the scheduler's mutex, before any runner can pop the state
+        the pass queued (corosio#17).
 
         @param desc The descriptor state of the closed descriptor.
         @param owner A strong reference to the object holding @a desc.
@@ -312,16 +314,18 @@ protected:
     struct retired_descriptor
     {
         scheduler_op* desc;
+        /// Gives the state a copy of `owner` if it is queued.
         void (*release)(scheduler_op*, std::shared_ptr<void>&) noexcept;
         std::shared_ptr<void> owner;
     };
 
-    /// Typed release for `retire_descriptor`.
+    /// Typed release for `retire_descriptor`. Called under `mutex_`.
     template<class DescState>
     static void
     release_retired(scheduler_op* desc, std::shared_ptr<void>& owner) noexcept
     {
-        static_cast<DescState*>(desc)->hold_owner_if_enqueued(std::move(owner));
+        owner = static_cast<DescState*>(desc)->keep_owner_if_enqueued(
+            std::move(owner));
     }
 
     /// Release descriptors retired during the pass that just ended.
@@ -764,26 +768,29 @@ void
 reactor_scheduler::retire_descriptor(
     DescState& desc, std::shared_ptr<void> owner) const noexcept
 {
+    lock_type lock(mutex_);
+    if (task_running_.load(std::memory_order_relaxed))
     {
-        lock_type lock(mutex_);
-        if (task_running_.load(std::memory_order_relaxed))
+        try
         {
-            try
-            {
-                retired_.push_back({&desc, &release_retired<DescState>, owner});
-                return;
-            }
-            catch (...)
-            {
-                // Out of memory: the pass may still hold desc, so keep
-                // the owner alive for good rather than risk freeing it.
-                conditionally_enabled_mutex::scoped_lock dlock(desc.mutex);
-                desc.impl_ref_ = std::move(owner);
-                return;
-            }
+            // A copy: if push_back throws, owner is still ours below.
+            retired_.push_back({&desc, &release_retired<DescState>, owner});
+            return;
+        }
+        catch (...)
+        {
+            // Out of memory: the pass may still hold desc, so keep
+            // the owner alive for good rather than risk freeing it.
+            conditionally_enabled_mutex::scoped_lock dlock(desc.mutex);
+            desc.impl_ref_ = std::move(owner);
+            return;
         }
     }
-    desc.hold_owner_if_enqueued(std::move(owner));
+    // Still under mutex_: no runner can pop desc until the owner is
+    // with it, if it is queued (corosio#17).
+    owner = desc.keep_owner_if_enqueued(std::move(owner));
+    lock.unlock();
+    // owner is dropped here, unlocked; a queued state holds its own copy.
 }
 
 inline void
@@ -795,10 +802,16 @@ reactor_scheduler::release_retired_descriptors(lock_type& lock) const
     // Only the thread that ran the pass gets here, before the task
     // sentinel is queued again, so retired_releasing_ is not shared.
     retired_releasing_.swap(retired_);
-    lock.unlock();
+    // Hand the owners over while mutex_ is still held. The pass spliced
+    // its ready queue under this same hold, so a state it queued after
+    // the close cannot be popped and invoked before its owner is with it
+    // (corosio#17; releasing them after unlocking let a runner invoke
+    // the state with no owner while the last reference was dropped).
     for (auto& r : retired_releasing_)
         r.release(r.desc, r.owner);
-    // Dropping the owners may destroy the impls; keep the lock released.
+    lock.unlock();
+    // Dropping the owners may destroy the impls (a queued state holds
+    // its own copy); keep the lock released.
     retired_releasing_.clear();
     lock.lock();
 }

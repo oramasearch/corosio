@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 #include <errno.h>
 #include <sys/socket.h>
@@ -112,6 +113,23 @@ struct reactor_descriptor_state : scheduler_op
     /// Prevents impl destruction while queued in the scheduler.
     std::shared_ptr<void> impl_ref_;
 
+    /** Guards `retired_owner_`.
+
+        A leaf lock: nothing else is locked while it is held. The
+        scheduler takes it under its own mutex, and invoke_deferred_io()
+        under `mutex`, so neither can take this state's `mutex` under the
+        scheduler's mutex (a socket's op registration posts to the
+        scheduler while holding `mutex`).
+    */
+    std::mutex retired_owner_mutex_;
+
+    /** The owner of a closed descriptor, handed over by the scheduler.
+
+        Set by keep_owner_if_enqueued() while the state is queued, and
+        taken by the next invoke_deferred_io(), like `impl_ref_`.
+    */
+    std::shared_ptr<void> retired_owner_;
+
     /// Add ready events atomically.
     /// Release pairs with the consumer's acquire exchange on
     /// ready_events_ so the consumer sees all flags. On x86 (TSO)
@@ -132,26 +150,54 @@ struct reactor_descriptor_state : scheduler_op
     /// the self-referential cycle set by close_socket().
     void destroy() override
     {
-        impl_ref_.reset();
+        // Either reference may be the last one: release both only after
+        // the last access to `*this`.
+        std::shared_ptr<void> owner = std::move(impl_ref_);
+        std::shared_ptr<void> retired;
+        {
+            std::lock_guard lock(retired_owner_mutex_);
+            retired = std::move(retired_owner_);
+        }
     }
 
     /** Keep @a owner alive while this state is queued.
 
-        Called through reactor_scheduler::retire_descriptor() for a
-        closed descriptor once no reactor pass can still hold it. If
-        the state is queued, @a owner moves into `impl_ref_` and is
-        released by the next invoke_deferred_io() or destroy();
-        otherwise it is dropped.
+        Called by reactor_scheduler::retire_descriptor() for a closed
+        descriptor once no reactor pass can still hold it, under the
+        scheduler's mutex. No runner can pop this state while that mutex
+        is held, so if a pass queued it after the close looked at
+        `is_enqueued_`, @a owner is in place before that queued state can
+        be invoked (oramasearch/corosio#17: the owner used to be handed
+        over after the scheduler's mutex was released, and a runner could
+        invoke the state first, with no owner, while the last reference
+        was dropped elsewhere).
 
         @param owner A strong reference to the object holding this state.
-            It may be the last one, so nothing here touches `*this`
-            after the mutex is released.
+
+        @return @a owner, for the caller to drop after it has released the
+            scheduler's mutex. When the state is queued it keeps a copy.
     */
-    void hold_owner_if_enqueued(std::shared_ptr<void> owner) noexcept
+    std::shared_ptr<void>
+    keep_owner_if_enqueued(std::shared_ptr<void> owner) noexcept
     {
-        conditionally_enabled_mutex::scoped_lock lock(mutex);
-        if (is_enqueued_.load(std::memory_order_acquire))
-            impl_ref_ = std::move(owner);
+        if (!is_enqueued_.load(std::memory_order_acquire))
+            return owner;
+        {
+            // A copy: once the state holds it, an invocation may take it
+            // and drop it, and only @a owner keeps *this alive here.
+            std::lock_guard lock(retired_owner_mutex_);
+            retired_owner_ = owner;
+        }
+        if (!is_enqueued_.load(std::memory_order_acquire))
+        {
+            // An invocation of a state queued before the close cleared the
+            // flag meanwhile; the close's own `impl_ref_` keeps that one
+            // alive. Take the copy back if it did not see it, so it does
+            // not stay here, holding the impl that holds it.
+            std::lock_guard lock(retired_owner_mutex_);
+            retired_owner_.reset(); // not the last reference: owner is one
+        }
+        return owner;
     }
 
     /** Perform deferred I/O and queue completions.
@@ -169,8 +215,15 @@ reactor_descriptor_state::invoke_deferred_io()
     std::shared_ptr<void> prevent_impl_destruction;
     op_queue local_ops;
 
+    // Read under the mutex, used after it. Once the mutex is released,
+    // nothing here may touch *this: with no owner and no completed op,
+    // nothing keeps the impl alive, and a close and the drop of its last
+    // reference on other runners can free it (corosio#17).
+    reactor_scheduler const* scheduler = nullptr;
+
     {
         conditionally_enabled_mutex::scoped_lock lock(mutex);
+        scheduler = scheduler_;
 
         // Must clear is_enqueued_ and move impl_ref_ under the same
         // lock that processes I/O. close_socket() checks is_enqueued_
@@ -179,12 +232,22 @@ reactor_descriptor_state::invoke_deferred_io()
         // skip setting impl_ref_, and destroy the impl under us.
         prevent_impl_destruction = std::move(impl_ref_);
         is_enqueued_.store(false, std::memory_order_release);
+        {
+            // After clearing the flag: keep_owner_if_enqueued() checks it
+            // again after storing, so an owner is either taken here or
+            // taken back there (corosio#17).
+            std::lock_guard owner_lock(retired_owner_mutex_);
+            if (!prevent_impl_destruction)
+                prevent_impl_destruction = std::move(retired_owner_);
+            else
+                retired_owner_.reset(); // same impl, not the last reference
+        }
 
         std::uint32_t ev = ready_events_.exchange(0, std::memory_order_acquire);
         if (ev == 0)
         {
             // Mutex unlocks here; compensate for work_cleanup's decrement
-            scheduler_->compensating_work_started();
+            scheduler->compensating_work_started();
             return;
         }
 
@@ -332,12 +395,12 @@ reactor_descriptor_state::invoke_deferred_io()
     scheduler_op* first = local_ops.pop();
     if (first)
     {
-        scheduler_->post_deferred_completions(local_ops);
+        scheduler->post_deferred_completions(local_ops);
         (*first)();
     }
     else
     {
-        scheduler_->compensating_work_started();
+        scheduler->compensating_work_started();
     }
 }
 
