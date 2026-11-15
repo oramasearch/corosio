@@ -106,6 +106,95 @@ apply_hostname_verification(SSL* ssl, std::string const& hostname)
 #endif
 }
 
+/*  OpenSSL reports failures as packed `ERR_get_error()` codes. They are not
+    errno values: put in `std::system_category()`, libc++ renders every one
+    of them as "unspecified system_category error" and libstdc++ as
+    "Unknown error N", which hides the actual failure (for example an empty
+    trust store). These categories render them with OpenSSL's own text.
+*/
+class openssl_error_category final : public std::error_category
+{
+public:
+    char const* name() const noexcept override
+    {
+        return "openssl";
+    }
+
+    std::string message(int ev) const override
+    {
+        std::array<char, 256> buffer{};
+        ERR_error_string_n(
+            static_cast<unsigned long>(static_cast<unsigned int>(ev)),
+            buffer.data(), buffer.size());
+        return buffer.data();
+    }
+};
+
+class x509_verify_error_category final : public std::error_category
+{
+public:
+    char const* name() const noexcept override
+    {
+        return "openssl.x509_verify";
+    }
+
+    std::string message(int ev) const override
+    {
+        return std::string("certificate verify failed: ") +
+            X509_verify_cert_error_string(ev);
+    }
+};
+
+inline std::error_category const&
+openssl_category() noexcept
+{
+    static openssl_error_category const category;
+    return category;
+}
+
+inline std::error_category const&
+x509_verify_category() noexcept
+{
+    static x509_verify_error_category const category;
+    return category;
+}
+
+/** Return the error for an OpenSSL failure that left `ssl_err` queued.
+
+    A zero `ssl_err` means OpenSSL queued nothing, which is reported as an
+    I/O error rather than as a success-looking zero code.
+*/
+inline std::error_code
+make_openssl_error(unsigned long ssl_err) noexcept
+{
+    if (ssl_err == 0)
+        return std::make_error_code(std::errc::io_error);
+    return std::error_code(
+        static_cast<int>(static_cast<unsigned int>(ssl_err)),
+        openssl_category());
+}
+
+/** Return the error for a failed handshake.
+
+    When certificate verification is what failed, the X.509 reason
+    ("unable to get local issuer certificate", "certificate has expired",
+    "hostname mismatch") is the useful part, so it is reported in place of
+    OpenSSL's generic "certificate verify failed".
+*/
+inline std::error_code
+make_handshake_error(SSL* ssl, unsigned long ssl_err) noexcept
+{
+    if (ERR_GET_LIB(ssl_err) == ERR_LIB_SSL &&
+        ERR_GET_REASON(ssl_err) == SSL_R_CERTIFICATE_VERIFY_FAILED)
+    {
+        long const verify = SSL_get_verify_result(ssl);
+        if (verify != X509_V_OK)
+            return std::error_code(
+                static_cast<int>(verify), x509_verify_category());
+    }
+    return make_openssl_error(ssl_err);
+}
+
 inline std::error_code
 normalize_openssl_shutdown_read_error(std::error_code ec) noexcept
 {
@@ -349,14 +438,18 @@ public:
             }
         }
 
+        // Each entry may be a bundle (load_verify_file() of a CA file such
+        // as /etc/ssl/cert.pem): add every certificate in it, not only the
+        // first one.
         X509_STORE* store = SSL_CTX_get_cert_store(ctx_);
         for (auto const& ca : cd.ca_certificates)
         {
             BIO* bio = BIO_new_mem_buf(ca.data(), static_cast<int>(ca.size()));
             if (bio)
             {
-                X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
-                if (cert)
+                X509* cert;
+                while ((cert = PEM_read_bio_X509(
+                            bio, nullptr, nullptr, nullptr)) != nullptr)
                 {
                     X509_STORE_add_cert(store, cert);
                     X509_free(cert);
@@ -364,6 +457,20 @@ public:
                 BIO_free(bio);
             }
         }
+
+        // add_verify_path(): hashed certificate directories (c_rehash layout).
+        for (auto const& path : cd.verify_paths)
+            SSL_CTX_load_verify_locations(ctx_, nullptr, path.c_str());
+
+        // set_default_verify_paths(): the platform trust store OpenSSL was
+        // built with, honoring SSL_CERT_FILE and SSL_CERT_DIR. Without this
+        // a client that asked for the system roots trusted nothing, and every
+        // verified handshake against a public certificate failed.
+        if (cd.use_default_verify_paths)
+            SSL_CTX_set_default_verify_paths(ctx_);
+
+        // A missing directory or file queues errors that are not failures.
+        ERR_clear_error();
 
         SSL_CTX_set_verify_depth(ctx_, cd.verify_depth);
 
@@ -574,16 +681,13 @@ struct openssl_stream::impl
                         if (ssl_err == 0)
                             ec = make_error_code(capy::error::stream_truncated);
                         else
-                            ec = std::error_code(
-                                static_cast<int>(ssl_err),
-                                std::system_category());
+                            ec = make_openssl_error(ssl_err);
                         co_return {ec, total_read};
                     }
                     else
                     {
                         unsigned long ssl_err = ERR_get_error();
-                        ec                    = std::error_code(
-                            static_cast<int>(ssl_err), std::system_category());
+                        ec                    = make_openssl_error(ssl_err);
                         co_return {ec, total_read};
                     }
                 }
@@ -644,8 +748,7 @@ struct openssl_stream::impl
                     else
                     {
                         unsigned long ssl_err = ERR_get_error();
-                        ec                    = std::error_code(
-                            static_cast<int>(ssl_err), std::system_category());
+                        ec                    = make_openssl_error(ssl_err);
                         co_return {ec, total_written};
                     }
                 }
@@ -700,8 +803,7 @@ struct openssl_stream::impl
                 else
                 {
                     unsigned long ssl_err = ERR_get_error();
-                    ec                    = std::error_code(
-                        static_cast<int>(ssl_err), std::system_category());
+                    ec                    = make_handshake_error(ssl_, ssl_err);
                     co_return {ec};
                 }
             }
@@ -767,8 +869,7 @@ struct openssl_stream::impl
                     }
                     else
                     {
-                        ec = std::error_code(
-                            static_cast<int>(ssl_err), std::system_category());
+                        ec = make_openssl_error(ssl_err);
                     }
                     co_return {ec};
                 }
@@ -783,16 +884,14 @@ struct openssl_stream::impl
         if (!native_ctx)
         {
             unsigned long err = ERR_get_error();
-            return std::error_code(
-                static_cast<int>(err), std::system_category());
+            return make_openssl_error(err);
         }
 
         ssl_ = SSL_new(native_ctx);
         if (!ssl_)
         {
             unsigned long err = ERR_get_error();
-            return std::error_code(
-                static_cast<int>(err), std::system_category());
+            return make_openssl_error(err);
         }
 
         BIO* int_bio = nullptr;
@@ -801,8 +900,7 @@ struct openssl_stream::impl
             unsigned long err = ERR_get_error();
             SSL_free(ssl_);
             ssl_ = nullptr;
-            return std::error_code(
-                static_cast<int>(err), std::system_category());
+            return make_openssl_error(err);
         }
 
         SSL_set_bio(ssl_, int_bio, int_bio);

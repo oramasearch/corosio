@@ -21,6 +21,16 @@
 
 #ifdef BOOST_COROSIO_HAS_OPENSSL
 
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+
 namespace boost::corosio {
 
 // Callable wrapper for passing to test helper templates
@@ -206,6 +216,207 @@ struct openssl_stream_test
         BOOST_TEST(server_received == client_payload);
     }
 
+    /** Set an environment variable for one scope, then restore it. */
+    struct scoped_env
+    {
+        std::string name_;
+        std::optional<std::string> saved_;
+
+        scoped_env(char const* name, std::string const& value) : name_(name)
+        {
+            if (auto const* old = std::getenv(name))
+                saved_ = old;
+            set(value.c_str());
+        }
+
+        ~scoped_env()
+        {
+            if (saved_)
+                set(saved_->c_str());
+            else
+                unset();
+        }
+
+        void set(char const* value)
+        {
+#ifdef _WIN32
+            _putenv_s(name_.c_str(), value);
+#else
+            ::setenv(name_.c_str(), value, 1);
+#endif
+        }
+
+        void unset()
+        {
+#ifdef _WIN32
+            _putenv_s(name_.c_str(), "");
+#else
+            ::unsetenv(name_.c_str());
+#endif
+        }
+    };
+
+    static std::filesystem::path make_temp_dir(char const* label)
+    {
+        auto dir = std::filesystem::temp_directory_path() /
+            (std::string("corosio-") + label + "-" +
+             std::to_string(
+                 std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(dir);
+        return dir;
+    }
+
+    static void write_file(std::filesystem::path const& path, char const* text)
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << text;
+    }
+
+    /** set_default_verify_paths() must load the platform trust store.
+
+        OpenSSL's default store honors SSL_CERT_FILE, so pointing it at the
+        test CA makes the "system" roots trust the test server. Before the
+        fix the flag was recorded and never applied, the client trusted
+        nothing, and this handshake failed.
+    */
+    void testDefaultVerifyPaths()
+    {
+        using namespace test;
+
+        auto dir     = make_temp_dir("default-verify");
+        auto ca_file = dir / "ca.pem";
+        write_file(ca_file, ca_cert_pem);
+
+        {
+            scoped_env env("SSL_CERT_FILE", ca_file.string());
+
+            io_context ioc;
+            tls_context client_ctx;
+            BOOST_TEST(!client_ctx.set_default_verify_paths());
+            BOOST_TEST(!client_ctx.set_verify_mode(tls_verify_mode::peer));
+            auto server_ctx = make_server_context();
+            run_tls_test(ioc, client_ctx, server_ctx, make_stream, make_stream);
+        }
+
+        std::filesystem::remove_all(dir);
+    }
+
+    /** add_verify_path() must load a hashed certificate directory. */
+    void testAddVerifyPath()
+    {
+        using namespace test;
+
+        auto dir = make_temp_dir("verify-path");
+
+        BIO* bio   = BIO_new_mem_buf(ca_cert_pem, -1);
+        X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+        BIO_free(bio);
+        BOOST_TEST(cert != nullptr);
+        if (!cert)
+            return;
+        char name[32];
+        std::snprintf(
+            name, sizeof(name), "%08lx.0", X509_subject_name_hash(cert));
+        X509_free(cert);
+        write_file(dir / name, ca_cert_pem);
+
+        {
+            io_context ioc;
+            tls_context client_ctx;
+            BOOST_TEST(!client_ctx.add_verify_path(dir.string()));
+            BOOST_TEST(!client_ctx.set_verify_mode(tls_verify_mode::peer));
+            auto server_ctx = make_server_context();
+            run_tls_test(ioc, client_ctx, server_ctx, make_stream, make_stream);
+        }
+
+        std::filesystem::remove_all(dir);
+    }
+
+    /** A CA bundle trusts every certificate in it, not only the first.
+
+        load_verify_file() of a system bundle such as /etc/ssl/cert.pem
+        passes one string holding many certificates. Only the first was
+        added, so a server signed by any later root failed verification.
+    */
+    void testCertificateAuthorityBundle()
+    {
+        using namespace test;
+
+        std::string bundle = std::string(root_ca_cert_pem) + ca_cert_pem;
+
+        // In memory
+        {
+            io_context ioc;
+            tls_context client_ctx;
+            BOOST_TEST(!client_ctx.add_certificate_authority(bundle));
+            BOOST_TEST(!client_ctx.set_verify_mode(tls_verify_mode::peer));
+            auto server_ctx = make_server_context();
+            run_tls_test(ioc, client_ctx, server_ctx, make_stream, make_stream);
+        }
+
+        // From a file
+        {
+            auto dir  = make_temp_dir("ca-bundle");
+            auto file = dir / "bundle.pem";
+            write_file(file, bundle.c_str());
+
+            io_context ioc;
+            tls_context client_ctx;
+            BOOST_TEST(!client_ctx.load_verify_file(file.string()));
+            BOOST_TEST(!client_ctx.set_verify_mode(tls_verify_mode::peer));
+            auto server_ctx = make_server_context();
+            run_tls_test(ioc, client_ctx, server_ctx, make_stream, make_stream);
+
+            std::filesystem::remove_all(dir);
+        }
+    }
+
+    /** A failed verification says why, instead of an opaque number.
+
+        OpenSSL's packed error codes used to be returned in
+        std::system_category(), which libc++ renders as "unspecified
+        system_category error" (corosio's private fork, liquid#368).
+    */
+    void testVerifyFailureMessage()
+    {
+        using namespace test;
+
+        io_context ioc;
+        tls_context client_ctx; // trusts nothing
+        BOOST_TEST(!client_ctx.set_verify_mode(tls_verify_mode::peer));
+        auto server_ctx = make_server_context();
+
+        auto [s1, s2] = corosio::test::make_socket_pair(ioc);
+        auto client   = make_stream(s1, client_ctx);
+        auto server   = make_stream(s2, server_ctx);
+
+        std::error_code client_ec;
+        auto client_task = [&]() -> capy::task<> {
+            auto [ec] = co_await client.handshake(openssl_stream::client);
+            client_ec = ec;
+            s1.cancel();
+            s1.close();
+            s2.cancel();
+            s2.close();
+        };
+        auto server_task = [&]() -> capy::task<> {
+            auto [ec] = co_await server.handshake(openssl_stream::server);
+            (void)ec;
+        };
+        capy::run_async(ioc.get_executor())(client_task());
+        capy::run_async(ioc.get_executor())(server_task());
+        ioc.run();
+
+        BOOST_TEST(static_cast<bool>(client_ec));
+        BOOST_TEST(
+            std::string_view(client_ec.category().name()) ==
+            "openssl.x509_verify");
+        auto const message = client_ec.message();
+        BOOST_TEST(message.starts_with("certificate verify failed: "));
+        BOOST_TEST(message.find("unspecified") == std::string::npos);
+        BOOST_TEST(message.find("Unknown error") == std::string::npos);
+    }
+
     void run()
     {
         test::testHandshakeFuse(make_stream);
@@ -230,6 +441,10 @@ struct openssl_stream_test
 
         testCertificateChain();
         testFullDuplex();
+        testDefaultVerifyPaths();
+        testAddVerifyPath();
+        testCertificateAuthorityBundle();
+        testVerifyFailureMessage();
         testName();
         testNextLayer();
     }
