@@ -200,7 +200,7 @@ public:
 
 struct continuation_post_test
 {
-    // The reproduction from corosio#12: a bare continuation at the start
+    // The reproduction: a bare continuation at the start
     // of a page whose previous page is unmapped, posted through the
     // concrete executor.
     void testBareContinuationAfterGuardPage()
