@@ -69,6 +69,5 @@ backend):
 
 On Linux the one-post case puts the reactor pass between the open and the
 connect, with the descriptor run after the connect parks. Without the fix it
-failed with `Input/output error` on epoll on every run. The tests run on Linux
-through the cluster BuildKit harness in
-`codex-work/build/corosio-linux-test/`.
+failed with `Input/output error` on epoll on every run. The tests must run on Linux
+to exercise the epoll backend.
