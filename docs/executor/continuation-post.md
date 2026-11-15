@@ -1,7 +1,7 @@
 # Posting a continuation reads only the continuation
 
 Applies to `io_context::executor_type::post(capy::continuation&)` and `dispatch`. Fork change for
-oramasearch/corosio#12, found by lake#604.
+oramasearch/corosio#12, found by a downstream application.
 
 ## The problem
 
@@ -16,7 +16,7 @@ the runners of the range `when_all` and `when_any`, which live in a
 heap block:
 
 - **A fault.** When the block starts a page whose previous page is unmapped, the read faults. On
-  macOS the nano allocator's zone starts at `0x600000000000`, so lake crashed at `0x5ffffffffff8`
+  macOS the nano allocator's zone starts at `0x600000000000`, so the application crashed at `0x5ffffffffff8`
   inside the launcher of a `when_all` over a vector of tasks.
 - **A wrong answer.** When those 8 bytes happen to hold the tag `0xC0710A`, the bare continuation
   is queued as a `scheduler_op` it is not.
@@ -42,4 +42,4 @@ the case is rare: a coroutine on a strand or pool posts to that executor, not to
 - A bare continuation behind bytes that equal the old tag. Before the change this died with SIGSEGV.
 - A `continuation_op` is still recognised; a bare continuation is not, whatever `next` holds.
 - A `continuation_op` queued on a capy `thread_pool` first is still resumed by an `io_context`.
-- `when_all` over vectors of 1 to 9 tasks on an `io_context`, the path lake crashed on.
+- `when_all` over vectors of 1 to 9 tasks on an `io_context`, the path the crash took.

@@ -1,7 +1,7 @@
 # A connect started after its socket was registered
 
 Applies to the reactor backends (epoll, kqueue, select). Fork change for
-oramasearch/corosio#10, found by lake#544 (lake PR #546).
+oramasearch/corosio#10, found by a downstream application.
 
 ## The problem
 
@@ -11,7 +11,7 @@ when the awaitable is created. The connect itself starts later, in
 gap. During it, a reactor pass can poll the socket.
 
 On Linux, epoll reports a TCP socket that is open but not yet connecting as
-`EPOLLOUT|EPOLLHUP`. lake's probe on kernel 6.8:
+`EPOLLOUT|EPOLLHUP`. A probe on kernel 6.8:
 
 ```
 open, registered, no connect:      events=OUT HUP
@@ -20,13 +20,14 @@ SO_ERROR after connect = 0
 after connect:                     events=OUT
 ```
 
-The epoll backend maps `EPOLLHUP` to read, write and error (zetta#740), and the
+The epoll backend maps `EPOLLHUP` to read, write and error, so that a hangup reaches a
+parked op, and the
 descriptor state recorded it. Two orders followed:
 
 - **Pass, then connect, then the descriptor runs.** The connect parks in
   `connect_op`, then `invoke_deferred_io()` runs with the stale error bit.
   `SO_ERROR` is 0, so it substituted `EIO` and failed the connect. Every connect
-  started this way failed, which is what lake saw.
+  started this way failed, which is what the application saw.
 - **Pass, the descriptor runs, then connect.** No op is parked, so the event
   sets `write_ready`. `register_op()` then ran the connect op's `perform_io()`
   at once, and `SO_ERROR == 0` could complete the connect as a success before the
@@ -46,7 +47,7 @@ A readiness event is no longer taken as proof that a connect finished.
   fails the connect with that error.
 - `invoke_deferred_io()` still substitutes `EIO` for an error event with
   `SO_ERROR == 0`, and still fails parked reads and writes with it, so a hangup
-  surfaces (zetta#740). A parked connect is the exception: it runs
+  surfaces. A parked connect is the exception: it runs
   `perform_io()` instead, which re-reads `SO_ERROR` and checks the connection,
   and is re-armed if the socket is still connecting.
 

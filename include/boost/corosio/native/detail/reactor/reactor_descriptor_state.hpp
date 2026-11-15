@@ -190,8 +190,8 @@ reactor_descriptor_state::invoke_deferred_io()
 
         int err = 0;
         // True when the error event carried no socket error. A parked
-        // read or write still fails with EIO (a hangup must surface, see
-        // zetta#740), but a parked connect checks its own state instead:
+        // read or write still fails with EIO (a hangup must surface),
+        // but a parked connect checks its own state instead:
         // epoll reports an open socket that has not started connecting
         // as EPOLLOUT|EPOLLHUP, and that event may have been recorded
         // before the connect started (oramasearch/corosio#10).

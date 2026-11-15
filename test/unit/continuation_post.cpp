@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2026 Steve Sperandeo
+// Copyright (c) 2026 Orama Search Inc.
 //
 // Distributed under the Boost Software License, Version 1.0. (See accompanying
 // file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
@@ -15,7 +15,7 @@
 // by reading a tag 8 bytes before the continuation. Capy's range when_all
 // and when_any post bare continuations from a heap array, so for the first
 // element that read landed before the block: it faulted when the block
-// started a page whose previous page was unmapped (lake#604, a segfault at
+// started a page whose previous page was unmapped (a segfault at
 // 0x5ffffffffff8, the start of the macOS nano zone minus 8), and it took
 // the continuation for a continuation_op when those bytes held the tag.
 // These tests place a bare continuation at the start of a page behind a
@@ -322,7 +322,7 @@ struct continuation_post_test
         BOOST_TEST_EQ(ran, 1);
     }
 
-    // The path lake#604 crashed on: when_all over a vector of tasks posts
+    // The path the crash took: when_all over a vector of tasks posts
     // each runner's bare continuation through the io_context executor.
     void testWhenAllOverManyTasks()
     {
