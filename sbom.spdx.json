@@ -2,17 +2,17 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "name": "corosio-be5142248478",
-  "documentNamespace": "https://github.com/oramasearch/corosio/sbom/be51422484784a35eef412934e4d8fd3511e5918",
+  "name": "corosio-867591a18f03",
+  "documentNamespace": "https://github.com/oramasearch/corosio/sbom/867591a18f034feea8904c9b9ca5a3979bf9074e",
   "creationInfo": {
-    "created": "2026-10-23T19:27:23Z",
+    "created": "2026-11-15T21:16:03Z",
     "creators": [
       "Organization: OramaSearch, Inc.",
       "Tool: tools/sbom.py",
       "Tool: syft"
     ],
     "licenseListVersion": "3.29",
-    "comment": "Made from source commit be51422484784a35eef412934e4d8fd3511e5918 by tools/sbom.py."
+    "comment": "Made from source commit 867591a18f034feea8904c9b9ca5a3979bf9074e by tools/sbom.py."
   },
   "documentDescribes": [
     "SPDXRef-DocumentRoot"
@@ -1246,7 +1246,7 @@
     {
       "name": "corosio",
       "SPDXID": "SPDXRef-DocumentRoot",
-      "versionInfo": "be5142248478",
+      "versionInfo": "867591a18f03",
       "downloadLocation": "git+https://github.com/oramasearch/corosio.git",
       "homepage": "https://github.com/oramasearch/corosio",
       "filesAnalyzed": false,
